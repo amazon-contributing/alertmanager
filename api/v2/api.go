@@ -57,6 +57,7 @@ import (
 	"github.com/prometheus/alertmanager/silence"
 	"github.com/prometheus/alertmanager/silence/silencepb"
 	"github.com/prometheus/alertmanager/tracing"
+	"github.com/prometheus/alertmanager/util/callback"
 )
 
 var tracer = tracing.NewTracer("github.com/prometheus/alertmanager/api/v2")
@@ -68,6 +69,7 @@ type API struct {
 	alerts         provider.Alerts
 	alertGroups    groupsFn
 	groupMutedFunc groupMutedFunc
+	apiCallback    callback.Callback
 	uptime         time.Time
 
 	// mtx protects alertmanagerConfig, setAlertStatus and route.
@@ -96,16 +98,21 @@ func NewAPI(
 	gf groupsFn,
 	gmf groupMutedFunc,
 	silences *silence.Silences,
+	apiCallback callback.Callback,
 	peer cluster.ClusterPeer,
 	l *slog.Logger,
 	r prometheus.Registerer,
 ) (*API, error) {
+	if apiCallback == nil {
+		apiCallback = callback.NoopAPICallback{}
+	}
 	api := API{
 		alerts:         alerts,
 		alertGroups:    gf,
 		groupMutedFunc: gmf,
 		peer:           peer,
 		silences:       silences,
+		apiCallback:    apiCallback,
 		logger:         l,
 		m:              metrics.NewAlerts(r),
 		uptime:         time.Now(),
@@ -346,7 +353,13 @@ func (api *API) getAlertsHandler(params alert_ops.GetAlertsParams) middleware.Re
 		return *res[i].Fingerprint < *res[j].Fingerprint
 	})
 
-	return alert_ops.NewGetAlertsOK().WithPayload(res)
+	callbackRes, err := api.apiCallback.V2GetAlertsCallback(res)
+	if err != nil {
+		logger.Error("Failed to call api callback", "err", err)
+		return alert_ops.NewGetAlertsInternalServerError().WithPayload(err.Error())
+	}
+
+	return alert_ops.NewGetAlertsOK().WithPayload(callbackRes)
 }
 
 func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.Responder {
@@ -528,7 +541,13 @@ func (api *API) getAlertGroupsHandler(params alertgroup_ops.GetAlertGroupsParams
 		res = append(res, ag)
 	}
 
-	return alertgroup_ops.NewGetAlertGroupsOK().WithPayload(res)
+	callbackRes, err := api.apiCallback.V2GetAlertGroupsCallback(res)
+	if err != nil {
+		logger.Error("Failed to call api callback", "err", err)
+		return alertgroup_ops.NewGetAlertGroupsInternalServerError().WithPayload(err.Error())
+	}
+
+	return alertgroup_ops.NewGetAlertGroupsOK().WithPayload(callbackRes)
 }
 
 // predictAlertStatus runs the silencer/inhibitor pipeline against a fresh
