@@ -37,6 +37,7 @@ import (
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/silence"
 	"github.com/prometheus/alertmanager/types"
+	"github.com/prometheus/alertmanager/util/callback"
 )
 
 // API represents all APIs of Alertmanager.
@@ -86,6 +87,9 @@ type Options struct {
 	// according to the current active configuration. Alerts returned are
 	// filtered by the arguments provided to the function.
 	GroupFunc func(context.Context, func(*dispatch.Route) bool, func(*types.Alert, time.Time) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string, error)
+
+	// APICallback define the callback function that each api call will perform before returned.
+	APICallback callback.Callback
 }
 
 func (o Options) validate() error {
@@ -128,6 +132,7 @@ func New(opts Options) (*API, error) {
 		opts.AlertStatusFunc,
 		opts.GroupMutedFunc,
 		opts.Silences,
+		opts.APICallback,
 		opts.Peer,
 		l.With("version", "v2"),
 		opts.Registry,
