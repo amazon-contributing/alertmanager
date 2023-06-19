@@ -14,8 +14,14 @@
 package v2
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	"github.com/prometheus/common/model"
+
+	"github.com/prometheus/alertmanager/provider"
+	"github.com/prometheus/alertmanager/types"
 
 	"github.com/go-openapi/strfmt"
 
@@ -62,4 +68,44 @@ func createLabelMatcher(t *testing.T, name, value string, matchType labels.Match
 
 	matcher, _ := labels.NewMatcher(matchType, name, value)
 	return matcher
+}
+
+// fakeAlerts is a struct implementing the provider.Alerts interface for tests.
+type fakeAlerts struct {
+	fps    map[model.Fingerprint]int
+	alerts []*types.Alert
+	err    error
+}
+
+func newFakeAlerts(alerts []*types.Alert) *fakeAlerts {
+	fps := make(map[model.Fingerprint]int)
+	for i, a := range alerts {
+		fps[a.Fingerprint()] = i
+	}
+	f := &fakeAlerts{
+		alerts: alerts,
+		fps:    fps,
+	}
+	return f
+}
+
+func (f *fakeAlerts) Subscribe(name string) provider.AlertIterator { return nil }
+func (f *fakeAlerts) SlurpAndSubscribe(name string) ([]*types.Alert, provider.AlertIterator) {
+	return nil, nil
+}
+func (f *fakeAlerts) Get(model.Fingerprint) (*types.Alert, error) { return nil, nil }
+func (f *fakeAlerts) Put(ctx context.Context, alerts ...*types.Alert) error {
+	return f.err
+}
+
+func (f *fakeAlerts) GetPending() provider.AlertIterator {
+	ch := make(chan *provider.Alert)
+	done := make(chan struct{})
+	go func() {
+		defer close(ch)
+		for _, a := range f.alerts {
+			ch <- &provider.Alert{Data: a}
+		}
+	}()
+	return provider.NewAlertIterator(ch, done, f.err)
 }
