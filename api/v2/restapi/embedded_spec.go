@@ -50,6 +50,49 @@ func init() {
   },
   "basePath": "/api/v2/",
   "paths": {
+    "/alertgroups": {
+      "get": {
+        "description": "Get a list of alert groups information",
+        "tags": [
+          "alertgroupinfolist"
+        ],
+        "operationId": "getAlertGroupInfoList",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "A regex matching receivers to filter alerts by",
+            "name": "receiver",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "The token for the next set of items to return",
+            "name": "nextToken",
+            "in": "query"
+          },
+          {
+            "type": "integer",
+            "description": "The maximum number of alert groups to return in one getAlertGroupInfoList operation.",
+            "name": "maxResults",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get alert groups info response",
+            "schema": {
+              "$ref": "#/definitions/alertGroupInfoList"
+            }
+          },
+          "400": {
+            "$ref": "#/responses/BadRequest"
+          },
+          "500": {
+            "$ref": "#/responses/InternalServerError"
+          }
+        }
+      }
+    },
     "/alerts": {
       "get": {
         "description": "Get a list of alerts",
@@ -413,6 +456,39 @@ func init() {
         },
         "receiver": {
           "$ref": "#/definitions/receiver"
+        }
+      }
+    },
+    "alertGroupInfo": {
+      "type": "object",
+      "required": [
+        "labels",
+        "receiver",
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/definitions/labelSet"
+        },
+        "receiver": {
+          "$ref": "#/definitions/receiver"
+        }
+      }
+    },
+    "alertGroupInfoList": {
+      "type": "object",
+      "properties": {
+        "alertGroupInfoList": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/alertGroupInfo"
+          }
+        },
+        "nextToken": {
+          "type": "string"
         }
       }
     },
@@ -834,6 +910,55 @@ func init() {
   },
   "basePath": "/api/v2/",
   "paths": {
+    "/alertgroups": {
+      "get": {
+        "description": "Get a list of alert groups information",
+        "tags": [
+          "alertgroupinfolist"
+        ],
+        "operationId": "getAlertGroupInfoList",
+        "parameters": [
+          {
+            "type": "string",
+            "description": "A regex matching receivers to filter alerts by",
+            "name": "receiver",
+            "in": "query"
+          },
+          {
+            "type": "string",
+            "description": "The token for the next set of items to return",
+            "name": "nextToken",
+            "in": "query"
+          },
+          {
+            "type": "integer",
+            "description": "The maximum number of alert groups to return in one getAlertGroupInfoList operation.",
+            "name": "maxResults",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Get alert groups info response",
+            "schema": {
+              "$ref": "#/definitions/alertGroupInfoList"
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "schema": {
+              "type": "string"
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
     "/alerts": {
       "get": {
         "description": "Get a list of alerts",
@@ -1227,6 +1352,39 @@ func init() {
         },
         "receiver": {
           "$ref": "#/definitions/receiver"
+        }
+      }
+    },
+    "alertGroupInfo": {
+      "type": "object",
+      "required": [
+        "labels",
+        "receiver",
+        "id"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "labels": {
+          "$ref": "#/definitions/labelSet"
+        },
+        "receiver": {
+          "$ref": "#/definitions/receiver"
+        }
+      }
+    },
+    "alertGroupInfoList": {
+      "type": "object",
+      "properties": {
+        "alertGroupInfoList": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/alertGroupInfo"
+          }
+        },
+        "nextToken": {
+          "type": "string"
         }
       }
     },
