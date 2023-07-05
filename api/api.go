@@ -87,7 +87,9 @@ type Options struct {
 	// according to the current active configuration. Alerts returned are
 	// filtered by the arguments provided to the function.
 	GroupFunc func(context.Context, func(*dispatch.Route) bool, func(*types.Alert, time.Time) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string, error)
-
+	// GroupInfoFunc returns a list of alert groups information. The alerts are grouped
+	// according to the current active configuration. This function will not return the alerts inside each group.
+	GroupInfoFunc func(func(*dispatch.Route) bool) dispatch.AlertGroupInfos
 	// APICallback define the callback function that each api call will perform before returned.
 	APICallback callback.Callback
 }
@@ -129,6 +131,7 @@ func New(opts Options) (*API, error) {
 	v2, err := apiv2.NewAPI(
 		opts.Alerts,
 		opts.GroupFunc,
+		opts.GroupInfoFunc,
 		opts.AlertStatusFunc,
 		opts.GroupMutedFunc,
 		opts.Silences,
