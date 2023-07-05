@@ -15,7 +15,10 @@ package dispatch
 
 import (
 	"context"
+
 	"errors"
+
+	"crypto/sha1"
 	"fmt"
 	"log/slog"
 	"runtime"
@@ -413,6 +416,48 @@ func (d *Dispatcher) Groups(ctx context.Context, routeFilter func(*Route) bool, 
 	return groups, receivers, nil
 }
 
+// AlertGroupInfo represents the aggrGroup information.
+type AlertGroupInfo struct {
+	Labels   model.LabelSet
+	Receiver string
+	ID       string
+}
+
+type AlertGroupInfos []*AlertGroupInfo
+
+func (ag AlertGroupInfos) Swap(i, j int) { ag[i], ag[j] = ag[j], ag[i] }
+func (ag AlertGroupInfos) Less(i, j int) bool {
+	return ag[i].ID < ag[j].ID
+}
+func (ag AlertGroupInfos) Len() int { return len(ag) }
+
+func (d *Dispatcher) GroupInfos(routeFilter func(*Route) bool) AlertGroupInfos {
+	groups := AlertGroupInfos{}
+
+	d.mtx.RLock()
+	defer d.mtx.RUnlock()
+
+	for route, ags := range d.aggrGroupsPerRoute {
+		if !routeFilter(route) {
+			continue
+		}
+
+		for _, ag := range ags {
+			receiver := route.RouteOpts.Receiver
+			alertGroup := &AlertGroupInfo{
+				Labels:   ag.labels,
+				Receiver: receiver,
+				ID:       ag.GroupID(),
+			}
+
+			groups = append(groups, alertGroup)
+		}
+	}
+	sort.Sort(groups)
+
+	return groups
+}
+
 // Stop the dispatcher.
 func (d *Dispatcher) Stop() {
 	if d == nil {
@@ -664,6 +709,12 @@ func newAggrGroup(
 
 func (ag *aggrGroup) fingerprint() model.Fingerprint {
 	return ag.labels.Fingerprint()
+}
+
+func (ag *aggrGroup) GroupID() string {
+	h := sha1.New()
+	h.Write([]byte(fmt.Sprintf("%s:%s", ag.routeID, ag.labels)))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func (ag *aggrGroup) GroupKey() string {
