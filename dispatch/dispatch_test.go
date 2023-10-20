@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/alertmanager/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/prometheus/common/model"
@@ -355,6 +356,8 @@ route:
 			return true
 		}, func(*alert.Alert, time.Time) bool {
 			return true
+		}, func(string) bool {
+			return true
 		},
 	)
 
@@ -515,8 +518,9 @@ route:
 
 	routeFilter := func(*Route) bool { return true }
 	alertFilter := func(*alert.Alert, time.Time) bool { return true }
+	groupFilter := func(string) bool { return true }
 
-	alertGroups, _, _ := dispatcher.Groups(context.Background(), routeFilter, alertFilter)
+	alertGroups, _, _ := dispatcher.Groups(context.Background(), routeFilter, alertFilter, groupFilter)
 	require.Len(t, alertGroups, 6)
 
 	require.Equal(t, 0.0, testutil.ToFloat64(m.aggrGroupLimitReached))
@@ -534,7 +538,7 @@ route:
 	require.Equal(t, 1.0, testutil.ToFloat64(m.aggrGroupLimitReached))
 
 	// Verify there are still only 6 groups.
-	alertGroups, _, _ = dispatcher.Groups(context.Background(), routeFilter, alertFilter)
+	alertGroups, _, _ = dispatcher.Groups(context.Background(), routeFilter, alertFilter, groupFilter)
 	require.Len(t, alertGroups, 6)
 }
 
@@ -571,8 +575,8 @@ route:
 	logger := promslog.NewNopLogger()
 	route := NewRoute(conf.Route, nil)
 	reg := prometheus.NewRegistry()
-	marker := types.NewMarker(reg)
-	alerts, err := mem.NewAlerts(context.Background(), marker, time.Hour, 0, nil, logger, reg, nil)
+	marker := marker.NewGroupMarker()
+	alerts, err := mem.NewAlerts(context.Background(), time.Hour, 0, nil, logger, eventrecorder.NopRecorder(), reg, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +584,7 @@ route:
 
 	timeout := func(d time.Duration) time.Duration { return time.Duration(0) }
 	recorder := &recordStage{alerts: make(map[string]map[model.Fingerprint]*types.Alert)}
-	dispatcher := NewDispatcher(alerts, route, recorder, marker, timeout, 10*time.Millisecond, nil, logger, NewDispatcherMetrics(false, prometheus.NewRegistry()))
+	dispatcher := NewDispatcher(alerts, route, recorder, marker, timeout, testMaintenanceInterval, nil, logger, eventrecorder.NopRecorder(), NewDispatcherMetrics(false, reg, nil))
 	go dispatcher.Run(time.Now())
 	defer dispatcher.Stop()
 
@@ -612,6 +616,12 @@ route:
 		},
 	)
 
+	groupID := func(route *Route, ls model.LabelSet) string {
+		el, ok := dispatcher.routeGroupsSlice[route.Idx].groups.Load(ls.Fingerprint())
+		require.True(t, ok)
+		return el.(*aggrGroup).GroupID()
+	}
+
 	require.Equal(t, AlertGroupInfos{
 		&AlertGroupInfo{
 			Labels: model.LabelSet{
@@ -620,10 +630,10 @@ route:
 			},
 			Receiver: "testing",
 			// Matches the first sub-route.
-			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[0]][model.LabelSet{
+			ID: groupID(dispatcher.route.Routes[0], model.LabelSet{
 				"alertname": "TestingAlert",
 				"service":   "api",
-			}.Fingerprint()].GroupID(),
+			}),
 		},
 		&AlertGroupInfo{
 			Labels: model.LabelSet{
@@ -633,11 +643,11 @@ route:
 			},
 			Receiver: "kafka",
 			// Matches the third sub-route.
-			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[2]][model.LabelSet{
+			ID: groupID(dispatcher.route.Routes[2], model.LabelSet{
 				"alertname": "HighLatency",
 				"service":   "db",
 				"cluster":   "bb",
-			}.Fingerprint()].GroupID(),
+			}),
 		},
 		&AlertGroupInfo{
 			Labels: model.LabelSet{
@@ -647,11 +657,11 @@ route:
 			},
 			Receiver: "prod",
 			// Matches the second sub-route.
-			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[1]][model.LabelSet{
+			ID: groupID(dispatcher.route.Routes[1], model.LabelSet{
 				"alertname": "HighErrorRate",
 				"service":   "api",
 				"cluster":   "bb",
-			}.Fingerprint()].GroupID(),
+			}),
 		},
 		&AlertGroupInfo{
 			Labels: model.LabelSet{
@@ -661,11 +671,11 @@ route:
 			},
 			Receiver: "prod",
 			// Matches the second sub-route.
-			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[1]][model.LabelSet{
+			ID: groupID(dispatcher.route.Routes[1], model.LabelSet{
 				"alertname": "HighLatency",
 				"service":   "db",
 				"cluster":   "bb",
-			}.Fingerprint()].GroupID(),
+			}),
 		},
 		&AlertGroupInfo{
 			Labels: model.LabelSet{
@@ -673,9 +683,9 @@ route:
 			},
 			Receiver: "prod",
 			// Matches the parent route.
-			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route][model.LabelSet{
+			ID: groupID(dispatcher.route, model.LabelSet{
 				"alertname": "OtherAlert",
-			}.Fingerprint()].GroupID(),
+			}),
 		},
 		&AlertGroupInfo{
 			Labels: model.LabelSet{
@@ -685,11 +695,11 @@ route:
 			},
 			Receiver: "prod",
 			// Matches the second sub-route.
-			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[1]][model.LabelSet{
+			ID: groupID(dispatcher.route.Routes[1], model.LabelSet{
 				"alertname": "HighErrorRate",
 				"service":   "api",
 				"cluster":   "aa",
-			}.Fingerprint()].GroupID(),
+			}),
 		},
 	}, alertGroupInfos)
 }

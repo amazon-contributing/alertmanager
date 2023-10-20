@@ -185,6 +185,7 @@ func populateGroups(b *testing.B, d *Dispatcher, alerts *mem.Alerts, numGroups, 
 		groups, _, _ := d.Groups(ctx,
 			func(*Route) bool { return true },
 			func(*alert.Alert, time.Time) bool { return true },
+			func(string) bool { return true },
 		)
 		return len(groups) >= expectedMinGroups
 	}, 30*time.Second, 10*time.Millisecond, "expected %d groups to be created", expectedMinGroups)
@@ -228,7 +229,7 @@ func benchmarkGroups(b *testing.B, numGroups, alertsPerGroup, numTeams, numClust
 
 	// Measure Groups() API latency
 	for b.Loop() {
-		groups, _, _ := dispatcher.Groups(ctx, routeFilter, alertFilter)
+		groups, _, _ := dispatcher.Groups(ctx, routeFilter, alertFilter, func(string) bool { return true })
 		if len(groups) != numGroups {
 			b.Fatalf("unexpected group count: %d (expected %d)", len(groups), numGroups)
 		}
@@ -291,7 +292,8 @@ func benchmarkIngestionUnderGroupsLoad(b *testing.B, numGroupsCallers int, group
 				case <-ticker.C:
 					dispatcher.Groups(ctx,
 						func(*Route) bool { return true },
-						func(*alert.Alert, time.Time) bool { return true })
+						func(*alert.Alert, time.Time) bool { return true },
+						func(string) bool { return true })
 				case <-stopCh:
 					return
 				}

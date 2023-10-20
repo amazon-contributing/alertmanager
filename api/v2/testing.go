@@ -20,6 +20,7 @@ import (
 
 	"github.com/prometheus/common/model"
 
+	"github.com/prometheus/alertmanager/marker"
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/types"
 
@@ -108,4 +109,31 @@ func (f *fakeAlerts) GetPending() provider.AlertIterator {
 		}
 	}()
 	return provider.NewAlertIterator(ch, done, f.err)
+}
+
+// newSetAlertStatus returns a setAlertStatusFn for tests. It derives an alert's
+// status from its labels ("silenced_by", "inhibited_by" and "state") and
+// records it on the AlertMarker carried in the context, mirroring how the real
+// inhibitor/silencer pipeline populates the marker.
+func newSetAlertStatus(_ *fakeAlerts) func(ctx context.Context, labels model.LabelSet) {
+	return func(ctx context.Context, labels model.LabelSet) {
+		m, ok := marker.FromContext(ctx)
+		if !ok {
+			return
+		}
+		fp := labels.Fingerprint()
+		if sb := labels["silenced_by"]; sb != "" {
+			m.SetSilenced(fp, []string{string(sb)})
+			return
+		}
+		if ib := labels["inhibited_by"]; ib != "" {
+			m.SetInhibited(fp, []string{string(ib)})
+			return
+		}
+		if labels["state"] == "active" {
+			// Register the fingerprint with no silences or inhibitions so its
+			// status resolves to active rather than unprocessed.
+			m.SetSilenced(fp, nil)
+		}
+	}
 }

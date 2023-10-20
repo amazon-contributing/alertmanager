@@ -332,7 +332,7 @@ func (ag AlertGroups) Less(i, j int) bool {
 func (ag AlertGroups) Len() int { return len(ag) }
 
 // Groups returns a slice of AlertGroups from the dispatcher's internal state.
-func (d *Dispatcher) Groups(ctx context.Context, routeFilter func(*Route) bool, alertFilter func(*alert.Alert, time.Time) bool) (AlertGroups, map[model.Fingerprint][]string, error) {
+func (d *Dispatcher) Groups(ctx context.Context, routeFilter func(*Route) bool, alertFilter func(*alert.Alert, time.Time) bool, groupIDFilter func(groupID string) bool) (AlertGroups, map[model.Fingerprint][]string, error) {
 	select {
 	case <-ctx.Done():
 		return nil, nil, ctx.Err()
@@ -366,6 +366,9 @@ func (d *Dispatcher) Groups(ctx context.Context, routeFilter func(*Route) bool, 
 
 		// Process the snapshot without holding sync.Map locks
 		for _, ag := range snapshot {
+			if !groupIDFilter(ag.GroupID()) {
+				continue
+			}
 			alertGroup := &AlertGroup{
 				Labels:   ag.labels,
 				Receiver: receiver,
@@ -434,16 +437,21 @@ func (ag AlertGroupInfos) Len() int { return len(ag) }
 func (d *Dispatcher) GroupInfos(routeFilter func(*Route) bool) AlertGroupInfos {
 	groups := AlertGroupInfos{}
 
-	d.mtx.RLock()
-	defer d.mtx.RUnlock()
-
-	for route, ags := range d.aggrGroupsPerRoute {
-		if !routeFilter(route) {
+	for i := range d.routeGroupsSlice {
+		if !routeFilter(d.routeGroupsSlice[i].route) {
 			continue
 		}
+		receiver := d.routeGroupsSlice[i].route.RouteOpts.Receiver
 
-		for _, ag := range ags {
-			receiver := route.RouteOpts.Receiver
+		// Snapshot the aggregation groups for this route to avoid holding
+		// sync.Map locks while building the response.
+		snapshot := make([]*aggrGroup, 0, d.routeGroupsSlice[i].groupsLen.Load()+32)
+		d.routeGroupsSlice[i].groups.Range(func(_, el any) bool {
+			snapshot = append(snapshot, el.(*aggrGroup))
+			return true
+		})
+
+		for _, ag := range snapshot {
 			alertGroup := &AlertGroupInfo{
 				Labels:   ag.labels,
 				Receiver: receiver,

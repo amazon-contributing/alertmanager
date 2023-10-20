@@ -397,8 +397,8 @@ func run() int {
 		disp.Load().Stop()
 	}()
 
-	groupFn := func(ctx context.Context, routeFilter func(*dispatch.Route) bool, alertFilter func(*alert.Alert, time.Time) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string, error) {
-		return disp.Load().Groups(ctx, routeFilter, alertFilter)
+	groupFn := func(ctx context.Context, routeFilter func(*dispatch.Route) bool, alertFilter func(*alert.Alert, time.Time) bool, groupIdsFilter func(string) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string, error) {
+		return disp.Load().Groups(ctx, routeFilter, alertFilter, groupIdsFilter)
 	}
 
 	// An interface value that holds a nil concrete value is non-nil.
