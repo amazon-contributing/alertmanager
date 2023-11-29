@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/inhibit"
@@ -169,18 +171,25 @@ func (pb *PipelineBuilder) New(
 	marker marker.GroupMarker,
 	notificationLog NotificationLog,
 	peer Peer,
+	o alertobserver.LifeCycleObserver,
 ) RoutingStage {
-	rs := make(RoutingStage, len(receivers))
+	rs := RoutingStage{
+		stages:          make(map[string]Stage, len(receivers)),
+		alertLCObserver: o,
+	}
 
 	ms := NewClusterGossipSettleStage(peer)
-	is := NewMuteStage(inhibitor, pb.metrics)
+	is := NewMuteStage(inhibitor, pb.metrics, o)
 	tas := NewTimeActiveStage(intervener, marker, pb.metrics)
 	tms := NewTimeMuteStage(intervener, marker, pb.metrics)
-	ss := NewMuteStage(silencer, pb.metrics)
+	ss := NewMuteStage(silencer, pb.metrics, o)
 
 	for name := range receivers {
-		st := createReceiverStage(name, receivers[name], wait, notificationLog, pb.metrics, pb.recorder)
-		rs[name] = MultiStage{ms, is, tas, tms, ss, st}
+		st := createReceiverStage(name, receivers[name], wait, notificationLog, pb.metrics, pb.recorder, o)
+		rs.stages[name] = MultiStage{
+			stages:          []Stage{ms, is, tas, tms, ss, st},
+			alertLCObserver: o,
+		}
 	}
 
 	pb.metrics.InitializeFor(receivers)
@@ -196,6 +205,7 @@ func createReceiverStage(
 	notificationLog NotificationLog,
 	metrics *Metrics,
 	recorder eventrecorder.Recorder,
+	o alertobserver.LifeCycleObserver,
 ) Stage {
 	var fs FanoutStage
 	for i := range integrations {
@@ -204,20 +214,23 @@ func createReceiverStage(
 			Integration: integrations[i].Name(),
 			Idx:         uint32(integrations[i].Index()),
 		}
-		var s MultiStage
+		var s []Stage
 		s = append(s, NewClusterWaitStage(wait))
 		s = append(s, NewDedupStage(&integrations[i], notificationLog, recv))
-		s = append(s, NewRetryStage(integrations[i], name, metrics, recorder))
+		s = append(s, NewRetryStage(integrations[i], name, metrics, recorder, o))
 		s = append(s, NewSetNotifiesStage(notificationLog, recv))
 
-		fs = append(fs, s)
+		fs = append(fs, MultiStage{stages: s, alertLCObserver: o})
 	}
 	return fs
 }
 
 // RoutingStage executes the inner stages based on the receiver specified in
 // the context.
-type RoutingStage map[string]Stage
+type RoutingStage struct {
+	stages          map[string]Stage
+	alertLCObserver alertobserver.LifeCycleObserver
+}
 
 // Exec implements the Stage interface.
 func (rs RoutingStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*alert.Alert) (context.Context, []*alert.Alert, error) {
@@ -235,21 +248,28 @@ func (rs RoutingStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*aler
 	)
 	defer span.End()
 
-	s, ok := rs[receiver]
+	s, ok := rs.stages[receiver]
 	if !ok {
 		return ctx, nil, errors.New("stage for receiver missing")
+	}
+
+	if rs.alertLCObserver != nil {
+		rs.alertLCObserver.Observe(alertobserver.EventAlertPipelineStart, alerts, alertobserver.AlertEventMeta{"ctx": ctx})
 	}
 
 	return s.Exec(ctx, l, alerts...)
 }
 
 // A MultiStage executes a series of stages sequentially.
-type MultiStage []Stage
+type MultiStage struct {
+	stages          []Stage
+	alertLCObserver alertobserver.LifeCycleObserver
+}
 
 // Exec implements the Stage interface.
 func (ms MultiStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*alert.Alert) (context.Context, []*alert.Alert, error) {
 	var err error
-	for _, s := range ms {
+	for _, s := range ms.stages {
 		if len(alerts) == 0 {
 			return ctx, nil, nil
 		}
@@ -257,6 +277,10 @@ func (ms MultiStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*alert.
 		ctx, alerts, err = s.Exec(ctx, l, alerts...)
 		if err != nil {
 			return ctx, nil, err
+		}
+		if ms.alertLCObserver != nil {
+			p := strings.Split(fmt.Sprintf("%T", s), ".")
+			ms.alertLCObserver.Observe(alertobserver.EventAlertPipelinePassStage, alerts, alertobserver.AlertEventMeta{"ctx": ctx, "stageName": p[len(p)-1]})
 		}
 	}
 	return ctx, alerts, nil

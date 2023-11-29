@@ -43,6 +43,7 @@ const (
 	keyAggrGroupID
 	keyFlushID
 	keyGroupMatchers
+	keyGroupId
 )
 
 // WithReceiverName populates a context with a receiver name.
@@ -53,6 +54,11 @@ func WithReceiverName(ctx context.Context, rcv string) context.Context {
 // WithGroupKey populates a context with a group key.
 func WithGroupKey(ctx context.Context, s string) context.Context {
 	return context.WithValue(ctx, keyGroupKey, s)
+}
+
+// WithGroupId populates a context with a group id.
+func WithGroupId(ctx context.Context, s string) context.Context {
+	return context.WithValue(ctx, keyGroupId, s)
 }
 
 // WithFiringAlerts populates a context with a slice of firing alerts.
@@ -118,6 +124,13 @@ func ReceiverName(ctx context.Context) (string, bool) {
 // second argument is false.
 func GroupKey(ctx context.Context) (string, bool) {
 	v, ok := ctx.Value(keyGroupKey).(string)
+	return v, ok
+}
+
+// GroupId extracts a group id from the context. Iff none exists, the
+// second argument is false.
+func GroupId(ctx context.Context) (string, bool) {
+	v, ok := ctx.Value(keyGroupId).(string)
 	return v, ok
 }
 

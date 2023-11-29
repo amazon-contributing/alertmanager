@@ -26,21 +26,23 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/eventrecorder"
 )
 
 // RetryStage notifies via passed integration with exponential backoff until it
 // succeeds. It aborts if the context is canceled or timed out.
 type RetryStage struct {
-	integration Integration
-	groupName   string
-	metrics     *Metrics
-	labelValues []string
-	recorder    eventrecorder.Recorder
+	integration     Integration
+	groupName       string
+	metrics         *Metrics
+	labelValues     []string
+	recorder        eventrecorder.Recorder
+	alertLCObserver alertobserver.LifeCycleObserver
 }
 
 // NewRetryStage returns a new instance of a RetryStage.
-func NewRetryStage(i Integration, groupName string, metrics *Metrics, recorder eventrecorder.Recorder) *RetryStage {
+func NewRetryStage(i Integration, groupName string, metrics *Metrics, recorder eventrecorder.Recorder, o alertobserver.LifeCycleObserver) *RetryStage {
 	labelValues := []string{i.Name()}
 
 	if metrics.ff.EnableReceiverNamesInMetrics() {
@@ -48,11 +50,12 @@ func NewRetryStage(i Integration, groupName string, metrics *Metrics, recorder e
 	}
 
 	return &RetryStage{
-		integration: i,
-		groupName:   groupName,
-		metrics:     metrics,
-		labelValues: labelValues,
-		recorder:    recorder,
+		integration:     i,
+		groupName:       groupName,
+		metrics:         metrics,
+		labelValues:     labelValues,
+		recorder:        recorder,
+		alertLCObserver: o,
 	}
 }
 
@@ -68,7 +71,7 @@ func (r RetryStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*alert.A
 	)
 	defer span.End()
 
-	ctx, alerts, err := r.exec(ctx, l, alerts...)
+	ctx, alerts, sent, err := r.exec(ctx, l, alerts...)
 
 	failureReason := DefaultReason.String()
 	if err != nil {
@@ -80,11 +83,26 @@ func (r RetryStage) Exec(ctx context.Context, l *slog.Logger, alerts ...*alert.A
 			failureReason = e.Reason.String()
 		}
 		r.metrics.numTotalFailedNotifications.WithLabelValues(append(r.labelValues, failureReason)...).Inc()
+		if r.alertLCObserver != nil {
+			m := alertobserver.AlertEventMeta{
+				"ctx":         ctx,
+				"integration": r.integration.Name(),
+				"stageName":   "RetryStage",
+			}
+			r.alertLCObserver.Observe(alertobserver.EventAlertSendFailed, sent, m)
+		}
+	} else if r.alertLCObserver != nil {
+		m := alertobserver.AlertEventMeta{
+			"ctx":         ctx,
+			"integration": r.integration.Name(),
+			"stageName":   "RetryStage",
+		}
+		r.alertLCObserver.Observe(alertobserver.EventAlertSent, sent, m)
 	}
 	return ctx, alerts, err
 }
 
-func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*alert.Alert) (context.Context, []*alert.Alert, error) {
+func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*alert.Alert) (context.Context, []*alert.Alert, alert.AlertSlice, error) {
 	var sent alert.AlertSlice
 
 	// If we shouldn't send notifications for resolved alerts, but there are only
@@ -93,10 +111,10 @@ func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*alert.A
 	if !r.integration.SendResolved() {
 		firing, ok := FiringAlerts(ctx)
 		if !ok {
-			return ctx, nil, errors.New("firing alerts missing")
+			return ctx, nil, sent, errors.New("firing alerts missing")
 		}
 		if len(firing) == 0 {
-			return ctx, alerts, nil
+			return ctx, alerts, sent, nil
 		}
 		for _, a := range alerts {
 			if a.Status() != model.AlertResolved {
@@ -138,9 +156,9 @@ func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*alert.A
 			}
 
 			if iErr != nil {
-				return ctx, nil, fmt.Errorf("%s/%s: notify retry canceled after %d attempts: %w", r.groupName, r.integration.String(), i, iErr)
+				return ctx, nil, sent, fmt.Errorf("%s/%s: notify retry canceled after %d attempts: %w", r.groupName, r.integration.String(), i, iErr)
 			}
-			return ctx, nil, nil
+			return ctx, nil, sent, nil
 		default:
 		}
 
@@ -155,7 +173,7 @@ func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*alert.A
 			if err != nil {
 				r.metrics.numNotificationRequestsFailedTotal.WithLabelValues(r.labelValues...).Inc()
 				if !retry {
-					return ctx, alerts, fmt.Errorf("%s/%s: notify retry canceled due to unrecoverable error after %d attempts: %w", r.groupName, r.integration.String(), i, err)
+					return ctx, alerts, sent, fmt.Errorf("%s/%s: notify retry canceled due to unrecoverable error after %d attempts: %w", r.groupName, r.integration.String(), i, err)
 				}
 				if ctx.Err() == nil {
 					if iErr == nil || err.Error() != iErr.Error() {
@@ -179,7 +197,7 @@ func (r RetryStage) exec(ctx context.Context, l *slog.Logger, alerts ...*alert.A
 				}
 
 				r.recorder.RecordEvent(ctx, NewNotificationEvent(ctx, sent, r.integration))
-				return ctx, alerts, nil
+				return ctx, alerts, sent, nil
 			}
 		case <-ctx.Done():
 		}

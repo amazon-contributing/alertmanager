@@ -30,6 +30,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/marker"
@@ -46,7 +47,7 @@ func TestMuteStage(t *testing.T) {
 	})
 
 	metrics := NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{})
-	stage := NewMuteStage(muter, metrics)
+	stage := NewMuteStage(muter, metrics, nil)
 
 	in := []model.LabelSet{
 		{},
@@ -111,7 +112,7 @@ func TestMuteStageWithSilences(t *testing.T) {
 	ctx := marker.WithContext(context.Background(), alertMarker)
 	silencer := silence.NewSilencer(silences, promslog.NewNopLogger(), eventrecorder.NopRecorder())
 	metrics := NewMetrics(reg, featurecontrol.NoopFlags{})
-	stage := NewMuteStage(silencer, metrics)
+	stage := NewMuteStage(silencer, metrics, nil)
 
 	in := []model.LabelSet{
 		{},
@@ -200,6 +201,49 @@ func TestMuteStageWithSilences(t *testing.T) {
 	if (len(in) - len(got) + suppressedRoundTwo) != suppressedRoundThree {
 		t.Fatalf("Expected %d alerts counted in suppressed metric but got %d", (len(in) - len(got)), suppressedRoundThree)
 	}
+}
+
+func TestMuteStageWithAlertObserver(t *testing.T) {
+	silences, err := silence.New(silence.Options{Metrics: prometheus.NewRegistry(), Retention: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sil := &silencepb.Silence{
+		EndsAt: timestamppb.New(utcNow().Add(time.Hour)),
+		MatcherSets: []*silencepb.MatcherSet{{
+			Matchers: []*silencepb.Matcher{{Name: "mute", Pattern: "me"}},
+		}},
+	}
+	if err = silences.Set(t.Context(), sil); err != nil {
+		t.Fatal(err)
+	}
+
+	alertMarker := marker.NewAlertMarker()
+	ctx := marker.WithContext(context.Background(), alertMarker)
+	silencer := silence.NewSilencer(silences, promslog.NewNopLogger(), eventrecorder.NopRecorder())
+	observer := alertobserver.NewFakeLifeCycleObserver()
+	metrics := NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{})
+	stage := NewMuteStage(silencer, metrics, observer)
+
+	in := []model.LabelSet{
+		{"test": "set"},
+		{"mute": "me"},
+		{"foo": "bar", "test": "set"},
+	}
+
+	var inAlerts []*alert.Alert
+	for _, lset := range in {
+		inAlerts = append(inAlerts, &alert.Alert{
+			Alert: model.Alert{Labels: lset},
+		})
+	}
+
+	_, _, err = stage.Exec(ctx, promslog.NewNopLogger(), inAlerts...)
+	if err != nil {
+		t.Fatalf("Exec failed: %s", err)
+	}
+	require.Equal(t, 1, len(observer.AlertsPerEvent[alertobserver.EventAlertMuted]))
+	require.Equal(t, inAlerts[1], observer.AlertsPerEvent[alertobserver.EventAlertMuted][0])
 }
 
 func TestTimeMuteStage(t *testing.T) {

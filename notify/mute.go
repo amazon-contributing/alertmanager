@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/inhibit"
 	"github.com/prometheus/alertmanager/marker"
 	"github.com/prometheus/alertmanager/silence"
@@ -53,13 +54,14 @@ func (f MuteFunc) Mutes(ctx context.Context, lset model.LabelSet) bool { return 
 
 // MuteStage filters alerts through a Muter.
 type MuteStage struct {
-	muter   Muter
-	metrics *Metrics
+	muter           Muter
+	metrics         *Metrics
+	alertLCObserver alertobserver.LifeCycleObserver
 }
 
 // NewMuteStage return a new MuteStage.
-func NewMuteStage(m Muter, metrics *Metrics) *MuteStage {
-	return &MuteStage{muter: m, metrics: metrics}
+func NewMuteStage(m Muter, metrics *Metrics, o alertobserver.LifeCycleObserver) *MuteStage {
+	return &MuteStage{muter: m, metrics: metrics, alertLCObserver: o}
 }
 
 // Exec implements the Stage interface.
@@ -112,6 +114,10 @@ func (n *MuteStage) Exec(ctx context.Context, logger *slog.Logger, alerts ...*al
 			mutedHashes[hashAlert(a)] = struct{}{}
 		}
 		ctx = WithMutedAlerts(ctx, mutedHashes)
+	}
+
+	if n.alertLCObserver != nil {
+		n.alertLCObserver.Observe(alertobserver.EventAlertMuted, muted, alertobserver.AlertEventMeta{"ctx": ctx})
 	}
 
 	return ctx, filtered, nil

@@ -15,10 +15,12 @@ package v2
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/prometheus/common/model"
+	"github.com/stretchr/testify/require"
 
 	"github.com/prometheus/alertmanager/marker"
 	"github.com/prometheus/alertmanager/provider"
@@ -136,4 +138,24 @@ func newSetAlertStatus(_ *fakeAlerts) func(ctx context.Context, labels model.Lab
 			m.SetSilenced(fp, nil)
 		}
 	}
+}
+
+func createAlert(t *testing.T, start, ends time.Time) (open_api_models.PostableAlerts, []byte) {
+	startsAt := strfmt.DateTime(start)
+	endsAt := strfmt.DateTime(ends)
+
+	alert := open_api_models.PostableAlert{
+		StartsAt:    startsAt,
+		EndsAt:      endsAt,
+		Annotations: open_api_models.LabelSet{"annotation1": "some text"},
+		Alert: open_api_models.Alert{
+			Labels:       open_api_models.LabelSet{"label1": "test1"},
+			GeneratorURL: "http://localhost:3000",
+		},
+	}
+	alerts := open_api_models.PostableAlerts{}
+	alerts = append(alerts, &alert)
+	b, err := json.Marshal(alerts)
+	require.NoError(t, err)
+	return alerts, b
 }

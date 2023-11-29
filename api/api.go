@@ -30,6 +30,7 @@ import (
 	"github.com/prometheus/common/route"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	apiv2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/cluster"
 	"github.com/prometheus/alertmanager/config"
@@ -89,6 +90,9 @@ type Options struct {
 	GroupInfoFunc func(func(*dispatch.Route) bool) dispatch.AlertGroupInfos
 	// APICallback define the callback function that each api call will perform before returned.
 	APICallback callback.Callback
+	// AlertLCObserver is used to add hooks to the different alert life cycle events.
+	// If nil then no observer methods will be invoked in the life cycle events.
+	AlertLCObserver alertobserver.LifeCycleObserver
 }
 
 func (o Options) validate() error {
@@ -132,6 +136,7 @@ func New(opts Options) (*API, error) {
 		opts.Peer,
 		l.With("version", "v2"),
 		opts.Registry,
+		opts.AlertLCObserver,
 	)
 	if err != nil {
 		return nil, err

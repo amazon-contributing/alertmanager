@@ -36,6 +36,7 @@ import (
 	"github.com/rs/cors"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	alertgroupinfolist_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroupinfolist"
 
 	"github.com/prometheus/alertmanager/alert"
@@ -84,8 +85,9 @@ type API struct {
 	route              *dispatch.Route
 	setAlertStatus     setAlertStatusFn
 
-	logger *slog.Logger
-	m      *metrics.Alerts
+	logger          *slog.Logger
+	m               *metrics.Alerts
+	alertLCObserver alertobserver.LifeCycleObserver
 
 	Handler http.Handler
 }
@@ -108,6 +110,7 @@ func NewAPI(
 	peer cluster.ClusterPeer,
 	l *slog.Logger,
 	r prometheus.Registerer,
+	o alertobserver.LifeCycleObserver,
 ) (*API, error) {
 	if apiCallback == nil {
 		apiCallback = callback.NoopAPICallback{}
@@ -123,6 +126,7 @@ func NewAPI(
 		logger:          l,
 		m:               metrics.NewAlerts(r),
 		uptime:          time.Now(),
+		alertLCObserver: o,
 	}
 
 	// Load embedded swagger file.
@@ -498,6 +502,10 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 		if err := a.Validate(); err != nil {
 			validationErrs = errors.Join(validationErrs, err)
 			api.m.Invalid().Inc()
+			if api.alertLCObserver != nil {
+				m := alertobserver.AlertEventMeta{"msg": err.Error()}
+				api.alertLCObserver.Observe(alertobserver.EventAlertRejected, []*alert.Alert{a}, m)
+			}
 			continue
 		}
 		validAlerts = append(validAlerts, a)
@@ -505,6 +513,10 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 	if err := api.alerts.Put(ctx, validAlerts...); err != nil {
 		message := "Failed to create alerts"
 		logger.Error(message, "err", err)
+		if api.alertLCObserver != nil {
+			m := alertobserver.AlertEventMeta{"msg": err.Error()}
+			api.alertLCObserver.Observe(alertobserver.EventAlertRejected, validAlerts, m)
+		}
 		span.SetStatus(codes.Error, message)
 		span.RecordError(err)
 		return alert_ops.NewPostAlertsInternalServerError().WithPayload(err.Error())
@@ -516,6 +528,9 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 		span.SetStatus(codes.Error, message)
 		span.RecordError(validationErrs)
 		return alert_ops.NewPostAlertsBadRequest().WithPayload(validationErrs.Error())
+	}
+	if api.alertLCObserver != nil {
+		api.alertLCObserver.Observe(alertobserver.EventAlertReceived, validAlerts, alertobserver.AlertEventMeta{})
 	}
 
 	return alert_ops.NewPostAlertsOK()

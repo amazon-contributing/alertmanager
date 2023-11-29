@@ -36,6 +36,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/prometheus/alertmanager/alert"
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/eventrecorder"
 	"github.com/prometheus/alertmanager/eventrecorder/eventrecorderpb"
 	"github.com/prometheus/alertmanager/marker"
@@ -83,8 +84,9 @@ type Dispatcher struct {
 	logger   *slog.Logger
 	recorder eventrecorder.Recorder
 
-	startTimer *time.Timer
-	state      atomic.Int32
+	startTimer      *time.Timer
+	state           atomic.Int32
+	alertLCObserver alertobserver.LifeCycleObserver
 }
 
 // Limits describes limits used by Dispatcher.
@@ -113,6 +115,7 @@ func NewDispatcher(
 	logger *slog.Logger,
 	recorder eventrecorder.Recorder,
 	metrics *DispatcherMetrics,
+	o alertobserver.LifeCycleObserver,
 ) *Dispatcher {
 	if limits == nil {
 		limits = nilLimits{}
@@ -137,6 +140,7 @@ func NewDispatcher(
 		metrics:             metrics,
 		limits:              limits,
 		propagator:          otel.GetTextMapPropagator(),
+		alertLCObserver:     o,
 	}
 	disp.state.Store(DispatcherStateUnknown)
 	disp.loaded = make(chan struct{})
@@ -505,6 +509,14 @@ func (d *Dispatcher) groupAlert(ctx context.Context, alert *alert.Alert, route *
 		// Try to insert into the aggrgroup.
 		// If it's destroyed insert will return false.
 		if ag.insert(ctx, alert) {
+			if d.alertLCObserver != nil {
+				m := alertobserver.AlertEventMeta{
+					"groupKey": ag.GroupKey(),
+					"routeId":  ag.routeID,
+					"groupId":  ag.GroupID(),
+				}
+				d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+			}
 			return
 		}
 	}
@@ -528,6 +540,9 @@ func (d *Dispatcher) groupAlert(ctx context.Context, alert *alert.Alert, route *
 				attribute.Int("alerting.aggregation_group.limit", limit),
 			),
 		)
+		if d.alertLCObserver != nil {
+			d.alertLCObserver.Observe(alertobserver.EventAlertFailedAddToAggrGroup, []*types.Alert{alert}, alertobserver.AlertEventMeta{"msg": err.Error()})
+		}
 		return
 	}
 
@@ -536,6 +551,14 @@ func (d *Dispatcher) groupAlert(ctx context.Context, alert *alert.Alert, route *
 	// function, to make sure that when the run() will be executed the 1st
 	// alert is already there.
 	ag.insert(ctx, alert)
+	if d.alertLCObserver != nil {
+		m := alertobserver.AlertEventMeta{
+			"groupKey": ag.GroupKey(),
+			"routeId":  ag.routeID,
+			"groupId":  ag.GroupID(),
+		}
+		d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+	}
 
 	retries := 0
 	for {
@@ -565,6 +588,14 @@ func (d *Dispatcher) groupAlert(ctx context.Context, alert *alert.Alert, route *
 			// we found an existing group, try to insert the alert into it. If it's destroyed, we will retry the whole process with the updated el.
 			agExisting := el.(*aggrGroup)
 			if agExisting.insert(ctx, alert) {
+				if d.alertLCObserver != nil {
+					m := alertobserver.AlertEventMeta{
+						"groupKey": agExisting.GroupKey(),
+						"routeId":  agExisting.routeID,
+						"groupId":  agExisting.GroupID(),
+					}
+					d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+				}
 				return // if we inserted we return to avoid incrementing the aggrgroup count and starting the group.
 			}
 		}
@@ -752,6 +783,7 @@ func (ag *aggrGroup) run(nf notifyFunc) {
 
 			// Populate context with information needed along the pipeline.
 			ctx = notify.WithGroupKey(ctx, ag.GroupKey())
+			ctx = notify.WithGroupId(ctx, ag.GroupID())
 			ctx = notify.WithGroupLabels(ctx, ag.labels)
 			ctx = notify.WithReceiverName(ctx, ag.opts.Receiver)
 			ctx = notify.WithRepeatInterval(ctx, ag.opts.RepeatInterval)
