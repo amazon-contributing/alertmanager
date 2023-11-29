@@ -37,6 +37,7 @@ import (
 	alertgroupinfolist_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroupinfolist"
 	"github.com/prometheus/alertmanager/util/callback"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/api/metrics"
 	open_api_models "github.com/prometheus/alertmanager/api/v2/models"
 	"github.com/prometheus/alertmanager/api/v2/restapi"
@@ -76,8 +77,9 @@ type API struct {
 	route              *dispatch.Route
 	setAlertStatus     setAlertStatusFn
 
-	logger log.Logger
-	m      *metrics.Alerts
+	logger          log.Logger
+	m               *metrics.Alerts
+	alertLCObserver alertobserver.LifeCycleObserver
 
 	Handler http.Handler
 }
@@ -100,6 +102,7 @@ func NewAPI(
 	peer cluster.ClusterPeer,
 	l log.Logger,
 	r prometheus.Registerer,
+	o alertobserver.LifeCycleObserver,
 ) (*API, error) {
 	if apiCallback == nil {
 		apiCallback = callback.NoopAPICallback{}
@@ -115,6 +118,7 @@ func NewAPI(
 		logger:          l,
 		m:               metrics.NewAlerts("v2", r),
 		uptime:          time.Now(),
+		alertLCObserver: o,
 	}
 
 	// Load embedded swagger file.
@@ -402,18 +406,29 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 		if err := a.Validate(); err != nil {
 			validationErrs.Add(err)
 			api.m.Invalid().Inc()
+			if api.alertLCObserver != nil {
+				m := alertobserver.AlertEventMeta{"msg": err.Error()}
+				api.alertLCObserver.Observe(alertobserver.EventAlertRejected, []*types.Alert{a}, m)
+			}
 			continue
 		}
 		validAlerts = append(validAlerts, a)
 	}
 	if err := api.alerts.Put(validAlerts...); err != nil {
 		level.Error(logger).Log("msg", "Failed to create alerts", "err", err)
+		if api.alertLCObserver != nil {
+			m := alertobserver.AlertEventMeta{"msg": err.Error()}
+			api.alertLCObserver.Observe(alertobserver.EventAlertRejected, validAlerts, m)
+		}
 		return alert_ops.NewPostAlertsInternalServerError().WithPayload(err.Error())
 	}
 
 	if validationErrs.Len() > 0 {
 		level.Error(logger).Log("msg", "Failed to validate alerts", "err", validationErrs.Error())
 		return alert_ops.NewPostAlertsBadRequest().WithPayload(validationErrs.Error())
+	}
+	if api.alertLCObserver != nil {
+		api.alertLCObserver.Observe(alertobserver.EventAlertReceived, validAlerts, alertobserver.AlertEventMeta{})
 	}
 
 	return alert_ops.NewPostAlertsOK()
