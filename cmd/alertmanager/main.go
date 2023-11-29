@@ -482,6 +482,7 @@ func run() int {
 			marker,
 			notificationLog,
 			pipelinePeer,
+			nil,
 		)
 
 		configuredReceivers.Set(float64(len(activeReceivers)))
@@ -493,7 +494,7 @@ func run() int {
 			silencer.Mutes(labels)
 		})
 
-		disp = dispatch.NewDispatcher(alerts, routes, pipeline, marker, timeoutFunc, *dispatchMaintenanceInterval, nil, logger, dispMetrics)
+		disp = dispatch.NewDispatcher(alerts, routes, pipeline, marker, timeoutFunc, *dispatchMaintenanceInterval, nil, logger, dispMetrics, nil)
 		routes.Walk(func(r *dispatch.Route) {
 			if r.RouteOpts.RepeatInterval > *retention {
 				configLogger.Warn(
