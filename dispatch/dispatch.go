@@ -36,6 +36,7 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/store"
@@ -111,8 +112,9 @@ type Dispatcher struct {
 
 	logger *slog.Logger
 
-	startTimer *time.Timer
-	state      int
+	startTimer      *time.Timer
+	state           int
+	alertLCObserver alertobserver.LifeCycleObserver
 }
 
 // Limits describes limits used by Dispatcher.
@@ -134,6 +136,7 @@ func NewDispatcher(
 	limits Limits,
 	logger *slog.Logger,
 	metrics *DispatcherMetrics,
+	o alertobserver.LifeCycleObserver,
 ) *Dispatcher {
 	if limits == nil {
 		limits = nilLimits{}
@@ -151,6 +154,7 @@ func NewDispatcher(
 		limits:              limits,
 		propagator:          otel.GetTextMapPropagator(),
 		state:               DispatcherStateUnknown,
+		alertLCObserver:     o,
 	}
 	disp.loadingFinished.Add(1)
 	return disp
@@ -488,6 +492,14 @@ func (d *Dispatcher) groupAlert(ctx context.Context, alert *types.Alert, route *
 	ag, ok := routeGroups[fp]
 	if ok {
 		ag.insert(ctx, alert)
+		if d.alertLCObserver != nil {
+			m := alertobserver.AlertEventMeta{
+				"groupKey": ag.GroupKey(),
+				"routeId":  ag.routeID,
+				"groupId":  ag.GroupID(),
+			}
+			d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+		}
 		return
 	}
 
@@ -504,6 +516,9 @@ func (d *Dispatcher) groupAlert(ctx context.Context, alert *types.Alert, route *
 				attribute.Int("alerting.aggregation_group.limit", limit),
 			),
 		)
+		if d.alertLCObserver != nil {
+			d.alertLCObserver.Observe(alertobserver.EventAlertFailedAddToAggrGroup, []*types.Alert{alert}, alertobserver.AlertEventMeta{"msg": err.Error()})
+		}
 		return
 	}
 
@@ -517,6 +532,14 @@ func (d *Dispatcher) groupAlert(ctx context.Context, alert *types.Alert, route *
 			attribute.Int("alerting.aggregation_group.count", d.aggrGroupsNum),
 		),
 	)
+	if d.alertLCObserver != nil {
+		m := alertobserver.AlertEventMeta{
+			"groupKey": ag.GroupKey(),
+			"routeId":  ag.routeID,
+			"groupId":  ag.GroupID(),
+		}
+		d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+	}
 
 	// Insert the 1st alert in the group before starting the group's run()
 	// function, to make sure that when the run() will be executed the 1st
@@ -669,6 +692,7 @@ func (ag *aggrGroup) run(nf notifyFunc) {
 
 			// Populate context with information needed along the pipeline.
 			ctx = notify.WithGroupKey(ctx, ag.GroupKey())
+			ctx = notify.WithGroupId(ctx, ag.GroupID())
 			ctx = notify.WithGroupLabels(ctx, ag.labels)
 			ctx = notify.WithReceiverName(ctx, ag.opts.Receiver)
 			ctx = notify.WithRepeatInterval(ctx, ag.opts.RepeatInterval)
