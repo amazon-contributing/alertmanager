@@ -31,6 +31,7 @@ import (
 	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/featurecontrol"
 	"github.com/prometheus/alertmanager/nflog"
 	"github.com/prometheus/alertmanager/nflog/nflogpb"
@@ -308,7 +309,7 @@ func TestMultiStage(t *testing.T) {
 		alerts3 = []*types.Alert{{}, {}, {}}
 	)
 
-	stage := MultiStage{
+	stages := []Stage{
 		StageFunc(func(ctx context.Context, l *slog.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
 			if !reflect.DeepEqual(alerts, alerts1) {
 				t.Fatal("Input not equal to input of MultiStage")
@@ -328,7 +329,9 @@ func TestMultiStage(t *testing.T) {
 			return ctx, alerts3, nil
 		}),
 	}
-
+	stage := MultiStage{
+		stages: stages,
+	}
 	_, alerts, err := stage.Exec(context.Background(), promslog.NewNopLogger(), alerts1...)
 	if err != nil {
 		t.Fatalf("Exec failed: %s", err)
@@ -337,13 +340,28 @@ func TestMultiStage(t *testing.T) {
 	if !reflect.DeepEqual(alerts, alerts3) {
 		t.Fatal("Output of MultiStage is not equal to the output of the last stage")
 	}
+
+	// Rerun multistage but with alert life cycle observer
+	observer := alertobserver.NewFakeLifeCycleObserver()
+	ctx := WithGroupKey(context.Background(), "test")
+	stage.alertLCObserver = observer
+	_, _, err = stage.Exec(ctx, promslog.NewNopLogger(), alerts1...)
+	if err != nil {
+		t.Fatalf("Exec failed: %s", err)
+	}
+
+	require.Equal(t, 1, len(observer.PipelineStageAlerts))
+	require.Equal(t, 5, len(observer.PipelineStageAlerts["StageFunc"]))
+	metaCtx := observer.MetaPerEvent[alertobserver.EventAlertPipelinePassStage][0]["ctx"].(context.Context)
+	_, ok := GroupKey(metaCtx)
+	require.True(t, ok)
 }
 
 func TestMultiStageFailure(t *testing.T) {
 	var (
 		ctx   = context.Background()
 		s1    = failStage{}
-		stage = MultiStage{s1}
+		stage = MultiStage{stages: []Stage{s1}}
 	)
 
 	_, _, err := stage.Exec(ctx, promslog.NewNopLogger(), nil)
@@ -358,7 +376,7 @@ func TestRoutingStage(t *testing.T) {
 		alerts2 = []*types.Alert{{}, {}}
 	)
 
-	stage := RoutingStage{
+	s := map[string]Stage{
 		"name": StageFunc(func(ctx context.Context, l *slog.Logger, alerts ...*types.Alert) (context.Context, []*types.Alert, error) {
 			if !reflect.DeepEqual(alerts, alerts1) {
 				t.Fatal("Input not equal to input of RoutingStage")
@@ -366,6 +384,9 @@ func TestRoutingStage(t *testing.T) {
 			return ctx, alerts2, nil
 		}),
 		"not": failStage{},
+	}
+	stage := RoutingStage{
+		stages: s,
 	}
 
 	ctx := WithReceiverName(context.Background(), "name")
@@ -378,6 +399,20 @@ func TestRoutingStage(t *testing.T) {
 	if !reflect.DeepEqual(alerts, alerts2) {
 		t.Fatal("Output of RoutingStage is not equal to the output of the inner stage")
 	}
+
+	// Rerun RoutingStage but with alert life cycle observer
+	observer := alertobserver.NewFakeLifeCycleObserver()
+	stage.alertLCObserver = observer
+	_, _, err = stage.Exec(ctx, promslog.NewNopLogger(), alerts1...)
+	if err != nil {
+		t.Fatalf("Exec failed: %s", err)
+	}
+	require.Equal(t, len(alerts1), len(observer.AlertsPerEvent[alertobserver.EventAlertPipelineStart]))
+	metaCtx := observer.MetaPerEvent[alertobserver.EventAlertPipelineStart][0]["ctx"].(context.Context)
+
+	_, ok := ReceiverName(metaCtx)
+	require.True(t, ok)
+
 }
 
 func TestRetryStageWithError(t *testing.T) {
@@ -394,7 +429,7 @@ func TestRetryStageWithError(t *testing.T) {
 		}),
 		rs: sendResolved(false),
 	}
-	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}))
+	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), nil)
 
 	alerts := []*types.Alert{
 		{
@@ -406,6 +441,7 @@ func TestRetryStageWithError(t *testing.T) {
 
 	ctx := context.Background()
 	ctx = WithFiringAlerts(ctx, []uint64{0})
+	ctx = WithGroupKey(ctx, "test")
 
 	// Notify with a recoverable error should retry and succeed.
 	resctx, res, err := r.Exec(ctx, promslog.NewNopLogger(), alerts...)
@@ -414,13 +450,40 @@ func TestRetryStageWithError(t *testing.T) {
 	require.Equal(t, alerts, sent)
 	require.NotNil(t, resctx)
 
+	// Rerun recoverable error but with alert life cycle observer
+	observer := alertobserver.NewFakeLifeCycleObserver()
+	r.alertLCObserver = observer
+	_, _, err = r.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.Nil(t, err)
+	require.Equal(t, len(alerts), len(observer.AlertsPerEvent[alertobserver.EventAlertSent]))
+	meta := observer.MetaPerEvent[alertobserver.EventAlertSent][0]
+	require.Equal(t, "RetryStage", meta["stageName"].(string))
+	require.Equal(t, i.Name(), meta["integration"].(string))
+	metaCtx := meta["ctx"].(context.Context)
+	_, ok := GroupKey(metaCtx)
+	require.True(t, ok)
+
 	// Notify with an unrecoverable error should fail.
 	sent = sent[:0]
 	fail = true
 	retry = false
+	r.alertLCObserver = nil
 	resctx, _, err = r.Exec(ctx, promslog.NewNopLogger(), alerts...)
 	require.Error(t, err)
 	require.NotNil(t, resctx)
+
+	// Rerun the unrecoverable error but with alert life cycle observer
+	fail = true
+	r.alertLCObserver = observer
+	_, _, err = r.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NotNil(t, err)
+	require.Equal(t, len(alerts), len(observer.AlertsPerEvent[alertobserver.EventAlertSendFailed]))
+	meta = observer.MetaPerEvent[alertobserver.EventAlertSendFailed][0]
+	require.Equal(t, "RetryStage", meta["stageName"].(string))
+	require.Equal(t, i.Name(), meta["integration"].(string))
+	metaCtx = meta["ctx"].(context.Context)
+	_, ok = GroupKey(metaCtx)
+	require.True(t, ok)
 }
 
 func TestRetryStageWithErrorCode(t *testing.T) {
@@ -447,7 +510,7 @@ func TestRetryStageWithErrorCode(t *testing.T) {
 			}),
 			rs: sendResolved(false),
 		}
-		r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}))
+		r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), nil)
 
 		alerts := []*types.Alert{
 			{
@@ -482,7 +545,7 @@ func TestRetryStageWithContextCanceled(t *testing.T) {
 		}),
 		rs: sendResolved(false),
 	}
-	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}))
+	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), nil)
 
 	alerts := []*types.Alert{
 		{
@@ -514,7 +577,7 @@ func TestRetryStageNoResolved(t *testing.T) {
 		}),
 		rs: sendResolved(false),
 	}
-	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}))
+	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), nil)
 
 	alerts := []*types.Alert{
 		{
@@ -565,7 +628,7 @@ func TestRetryStageSendResolved(t *testing.T) {
 		}),
 		rs: sendResolved(true),
 	}
-	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}))
+	r := NewRetryStage(i, "", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), nil)
 
 	alerts := []*types.Alert{
 		{
@@ -670,7 +733,7 @@ func TestMuteStage(t *testing.T) {
 	})
 
 	metrics := NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{})
-	stage := NewMuteStage(muter, metrics)
+	stage := NewMuteStage(muter, metrics, nil)
 
 	in := []model.LabelSet{
 		{},
@@ -732,7 +795,7 @@ func TestMuteStageWithSilences(t *testing.T) {
 	marker := types.NewMarker(reg)
 	silencer := silence.NewSilencer(silences, marker, promslog.NewNopLogger())
 	metrics := NewMetrics(reg, featurecontrol.NoopFlags{})
-	stage := NewMuteStage(silencer, metrics)
+	stage := NewMuteStage(silencer, metrics, nil)
 
 	in := []model.LabelSet{
 		{},
@@ -821,6 +884,46 @@ func TestMuteStageWithSilences(t *testing.T) {
 	if (len(in) - len(got) + suppressedRoundTwo) != suppressedRoundThree {
 		t.Fatalf("Expected %d alerts counted in suppressed metric but got %d", (len(in) - len(got)), suppressedRoundThree)
 	}
+}
+
+func TestMuteStageWithAlertObserver(t *testing.T) {
+	silences, err := silence.New(silence.Options{Metrics: prometheus.NewRegistry(), Retention: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = silences.Set(context.Background(), &silencepb.Silence{
+		EndsAt:   utcNow().Add(time.Hour),
+		Matchers: []*silencepb.Matcher{{Name: "mute", Pattern: "me"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	marker := types.NewMarker(prometheus.NewRegistry())
+	silencer := silence.NewSilencer(silences, marker, promslog.NewNopLogger())
+	observer := alertobserver.NewFakeLifeCycleObserver()
+	metrics := NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{})
+	stage := NewMuteStage(silencer, metrics, observer)
+
+	in := []model.LabelSet{
+		{"test": "set"},
+		{"mute": "me"},
+		{"foo": "bar", "test": "set"},
+	}
+
+	var inAlerts []*types.Alert
+	for _, lset := range in {
+		inAlerts = append(inAlerts, &types.Alert{
+			Alert: model.Alert{Labels: lset},
+		})
+	}
+
+	_, _, err = stage.Exec(context.Background(), promslog.NewNopLogger(), inAlerts...)
+	if err != nil {
+		t.Fatalf("Exec failed: %s", err)
+	}
+	require.Equal(t, 1, len(observer.AlertsPerEvent[alertobserver.EventAlertMuted]))
+	require.Equal(t, inAlerts[1], observer.AlertsPerEvent[alertobserver.EventAlertMuted][0])
 }
 
 func TestTimeMuteStage(t *testing.T) {
@@ -1068,6 +1171,329 @@ alertmanager_notifications_suppressed_total{reason="active_time_interval"} %d
 			}
 		})
 	}
+}
+
+func TestReceiverData_PreservationWhenNotifierDoesNotUpdate(t *testing.T) {
+	var storedData *nflog.Store
+	callCount := 0
+
+	tnflog := &testNflog{
+		logFunc: func(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64, receiverData *nflog.Store, expiry time.Duration) error {
+			storedData = receiverData
+			return nil
+		},
+	}
+
+	tnflog.qres = []*nflogpb.Entry{}
+
+	recv := &nflogpb.Receiver{GroupName: "test"}
+	dedupStage := NewDedupStage(sendResolved(true), tnflog, recv)
+
+	notifier := notifierFunc(func(ctx context.Context, alerts ...*types.Alert) (bool, error) {
+		callCount++
+
+		if callCount == 1 {
+			// First call - store some data
+			if store, ok := NflogStore(ctx); ok {
+				store.SetStr("threadTs", "1234.5678")
+			}
+			return false, nil
+		}
+		// Second call - notifier doesn't update ReceiverData
+		// Does NOT call StoreStr - just returns success
+		return false, nil
+	})
+
+	integration := NewIntegration(notifier, sendResolved(true), "test", 0, "test-receiver")
+	retryStage := NewRetryStage(integration, "test", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), nil)
+	setNotifiesStage := NewSetNotifiesStage(tnflog, recv)
+
+	ctx := context.Background()
+	ctx = WithGroupKey(ctx, "testkey")
+	ctx = WithRepeatInterval(ctx, time.Hour)
+
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels: model.LabelSet{"alertname": "test"},
+			},
+		},
+	}
+
+	// First notification
+	ctx, _, err := dedupStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	ctx, _, err = retryStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	_, _, err = setNotifiesStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	// Verify first notification stored data
+	require.NotNil(t, storedData)
+	threadTs, found := storedData.GetStr("threadTs")
+	require.True(t, found, "threadTs should be in stored data")
+	require.Equal(t, "1234.5678", threadTs)
+
+	firstReceiverData := map[string]*nflogpb.ReceiverDataValue{
+		"threadTs": {
+			Value: &nflogpb.ReceiverDataValue_StrVal{StrVal: "1234.5678"},
+		},
+	}
+
+	// Second notification - load previous state
+	tnflog.qres = []*nflogpb.Entry{
+		{
+			Receiver:       recv,
+			GroupKey:       []byte("testkey"),
+			FiringAlerts:   []uint64{1},
+			ResolvedAlerts: []uint64{},
+			ReceiverData:   firstReceiverData,
+		},
+	}
+
+	ctx = context.Background()
+	ctx = WithGroupKey(ctx, "testkey")
+	ctx = WithRepeatInterval(ctx, time.Hour)
+
+	ctx, _, err = dedupStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	ctx, _, err = retryStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	_, _, err = setNotifiesStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	if storedData == nil {
+		t.Error("ReceiverData was lost! Second notification has nil data")
+	} else {
+		if threadTs, exists := storedData.GetStr("threadTs"); !exists {
+			t.Error("ReceiverData 'threadTs' was lost! Second notification doesn't have it")
+		} else {
+			t.Logf("threadTs value: %s", threadTs)
+		}
+	}
+}
+
+func TestDedupStageExtractsReceiverData_DataPresent(t *testing.T) {
+	receiverData := map[string]*nflogpb.ReceiverDataValue{
+		"threadTs": {
+			Value: &nflogpb.ReceiverDataValue_StrVal{StrVal: "1234.5678"},
+		},
+		"counter": {
+			Value: &nflogpb.ReceiverDataValue_IntVal{IntVal: 42},
+		},
+	}
+
+	entry := &nflogpb.Entry{
+		Receiver:     &nflogpb.Receiver{GroupName: "test"},
+		GroupKey:     []byte("key"),
+		FiringAlerts: []uint64{1, 2, 3},
+		ReceiverData: receiverData,
+	}
+
+	tnflog := &testNflog{
+		qres: []*nflogpb.Entry{entry},
+	}
+
+	stage := NewDedupStage(sendResolved(false), tnflog, &nflogpb.Receiver{GroupName: "test"})
+
+	ctx := context.Background()
+	ctx = WithGroupKey(ctx, "key")
+	ctx = WithRepeatInterval(ctx, time.Hour)
+
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels: model.LabelSet{"alertname": "test"},
+			},
+		},
+	}
+
+	resCtx, _, err := stage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	store, ok := NflogStore(resCtx)
+	require.True(t, ok, "NflogStore should be in context")
+	require.NotNil(t, store)
+
+	threadTs, found := store.GetStr("threadTs")
+	require.True(t, found)
+	require.Equal(t, "1234.5678", threadTs)
+
+	counter, found := store.GetInt("counter")
+	require.True(t, found)
+	require.Equal(t, int64(42), counter)
+}
+
+func TestDedupStageExtractsReceiverData_NilReceiverData(t *testing.T) {
+	entry := &nflogpb.Entry{
+		Receiver:     &nflogpb.Receiver{GroupName: "test"},
+		GroupKey:     []byte("key"),
+		FiringAlerts: []uint64{1, 2, 3},
+		ReceiverData: nil,
+	}
+
+	tnflog := &testNflog{
+		qres: []*nflogpb.Entry{entry},
+	}
+
+	stage := NewDedupStage(sendResolved(false), tnflog, &nflogpb.Receiver{GroupName: "test"})
+
+	ctx := context.Background()
+	ctx = WithGroupKey(ctx, "key")
+	ctx = WithRepeatInterval(ctx, time.Hour)
+
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels: model.LabelSet{"alertname": "test"},
+			},
+		},
+	}
+
+	resCtx, _, err := stage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	store, ok := NflogStore(resCtx)
+	require.True(t, ok, "NflogStore should be in context even when ReceiverData is nil")
+	require.NotNil(t, store)
+}
+
+func TestDedupStageExtractsReceiverData_NoEntry(t *testing.T) {
+	tnflog := &testNflog{
+		qres: []*nflogpb.Entry{},
+	}
+
+	stage := NewDedupStage(sendResolved(false), tnflog, &nflogpb.Receiver{GroupName: "test"})
+
+	ctx := context.Background()
+	ctx = WithGroupKey(ctx, "key")
+	ctx = WithRepeatInterval(ctx, time.Hour)
+
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels: model.LabelSet{"alertname": "test"},
+			},
+		},
+	}
+
+	resCtx, _, err := stage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	store, ok := NflogStore(resCtx)
+	require.True(t, ok, "NflogStore should be in context even when no entry exists")
+	require.NotNil(t, store)
+}
+
+func TestNflogStore_NoLeakBetweenNotificationSequences(t *testing.T) {
+	var storedData *nflog.Store
+	callCount := 0
+	var capturedStoreValues []map[string]string
+
+	tnflog := &testNflog{
+		logFunc: func(r *nflogpb.Receiver, gkey string, firingAlerts, resolvedAlerts []uint64, receiverData *nflog.Store, expiry time.Duration) error {
+			storedData = receiverData
+			return nil
+		},
+	}
+
+	recv := &nflogpb.Receiver{GroupName: "test"}
+	dedupStage := NewDedupStage(sendResolved(true), tnflog, recv)
+
+	notifier := notifierFunc(func(ctx context.Context, alerts ...*types.Alert) (bool, error) {
+		callCount++
+		store, ok := NflogStore(ctx)
+		require.True(t, ok, "Store should be available in context")
+
+		storeSnapshot := make(map[string]string)
+		if val, found := store.GetStr("session_data"); found {
+			storeSnapshot["session_data"] = val
+		}
+		capturedStoreValues = append(capturedStoreValues, storeSnapshot)
+
+		store.SetStr("session_data", fmt.Sprintf("session_%d", callCount))
+		return false, nil
+	})
+
+	integration := NewIntegration(notifier, sendResolved(true), "test", 0, "test-receiver")
+	retryStage := NewRetryStage(integration, "test", NewMetrics(prometheus.NewRegistry(), featurecontrol.NoopFlags{}), nil)
+	setNotifiesStage := NewSetNotifiesStage(tnflog, recv)
+
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels: model.LabelSet{"alertname": "test"},
+				EndsAt: time.Now().Add(time.Hour),
+			},
+		},
+	}
+
+	// Scenario 1: First notification ever (no previous nflog entry)
+	tnflog.qres = []*nflogpb.Entry{}
+
+	ctx := context.Background()
+	ctx = WithGroupKey(ctx, "testkey")
+	ctx = WithRepeatInterval(ctx, time.Hour)
+
+	ctx, _, err := dedupStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	ctx, _, err = retryStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	_, _, err = setNotifiesStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	require.Equal(t, 1, callCount)
+	require.Empty(t, capturedStoreValues[0], "First notification should see empty Store")
+
+	require.NotNil(t, storedData)
+	sessionData, found := storedData.GetStr("session_data")
+	require.True(t, found)
+	require.Equal(t, "session_1", sessionData)
+
+	// Scenario 2: Alert resolves, then fires again (new firing sequence)
+	firstSessionData := map[string]*nflogpb.ReceiverDataValue{
+		"session_data": {
+			Value: &nflogpb.ReceiverDataValue_StrVal{StrVal: "session_1"},
+		},
+	}
+
+	tnflog.qres = []*nflogpb.Entry{
+		{
+			Receiver:       recv,
+			GroupKey:       []byte("testkey"),
+			FiringAlerts:   []uint64{},
+			ResolvedAlerts: []uint64{1},
+			ReceiverData:   firstSessionData,
+		},
+	}
+
+	ctx = context.Background()
+	ctx = WithGroupKey(ctx, "testkey")
+	ctx = WithRepeatInterval(ctx, time.Hour)
+
+	ctx, _, err = dedupStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	ctx, _, err = retryStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	_, _, err = setNotifiesStage.Exec(ctx, promslog.NewNopLogger(), alerts...)
+	require.NoError(t, err)
+
+	require.Equal(t, 2, callCount)
+	require.Len(t, capturedStoreValues, 2)
+	require.Empty(t, capturedStoreValues[1], "New firing sequence should see empty Store (no leak from resolved entry)")
+
+	require.NotNil(t, storedData)
+	sessionData, found = storedData.GetStr("session_data")
+	require.True(t, found)
+	require.Equal(t, "session_2", sessionData)
 }
 
 func BenchmarkHashAlert(b *testing.B) {

@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/store"
@@ -96,6 +97,10 @@ type Dispatcher struct {
 	cancel              func()
 
 	logger *slog.Logger
+
+	startTimer      *time.Timer
+	state           int
+	alertLCObserver alertobserver.LifeCycleObserver
 }
 
 // Limits describes limits used by Dispatcher.
@@ -108,30 +113,34 @@ type Limits interface {
 
 // NewDispatcher returns a new Dispatcher.
 func NewDispatcher(
-	ap provider.Alerts,
-	r *Route,
-	s notify.Stage,
-	mk types.GroupMarker,
-	to func(time.Duration) time.Duration,
-	mi time.Duration,
-	lim Limits,
-	l *slog.Logger,
-	m *DispatcherMetrics,
+	alerts provider.Alerts,
+	route *Route,
+	stage notify.Stage,
+	marker types.GroupMarker,
+	timeout func(time.Duration) time.Duration,
+	maintenanceInterval time.Duration,
+	limits Limits,
+	logger *slog.Logger,
+	metrics *DispatcherMetrics,
+	o alertobserver.LifeCycleObserver,
 ) *Dispatcher {
 	if lim == nil {
 		lim = nilLimits{}
 	}
 
 	disp := &Dispatcher{
-		alerts:              ap,
-		stage:               s,
-		route:               r,
-		marker:              mk,
-		timeout:             to,
-		maintenanceInterval: mi,
-		logger:              l.With("component", "dispatcher"),
-		metrics:             m,
-		limits:              lim,
+		alerts:              alerts,
+		stage:               stage,
+		route:               route,
+		marker:              marker,
+		timeout:             timeout,
+		maintenanceInterval: maintenanceInterval,
+		logger:              logger.With("component", "dispatcher"),
+		metrics:             metrics,
+		limits:              limits,
+		propagator:          otel.GetTextMapPropagator(),
+		state:               DispatcherStateUnknown,
+		alertLCObserver:     o,
 	}
 	return disp
 }
@@ -383,14 +392,34 @@ func (d *Dispatcher) processAlert(alert *types.Alert, route *Route) {
 
 	ag, ok := routeGroups[fp]
 	if ok {
-		ag.insert(alert)
+		ag.insert(ctx, alert)
+		if d.alertLCObserver != nil {
+			m := alertobserver.AlertEventMeta{
+				"groupKey": ag.GroupKey(),
+				"routeId":  ag.routeID,
+				"groupId":  ag.GroupID(),
+			}
+			d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+		}
 		return
 	}
 
 	// If the group does not exist, create it. But check the limit first.
 	if limit := d.limits.MaxNumberOfAggregationGroups(); limit > 0 && d.aggrGroupsNum >= limit {
 		d.metrics.aggrGroupLimitReached.Inc()
-		d.logger.Error("Too many aggregation groups, cannot create new group for alert", "groups", d.aggrGroupsNum, "limit", limit, "alert", alert.Name())
+		err := errors.New("too many aggregation groups, cannot create new group for alert")
+		message := "Failed to create aggregation group"
+		d.logger.Error(message, "err", err.Error(), "groups", d.aggrGroupsNum, "limit", limit, "alert", alert.Name())
+		span.SetStatus(codes.Error, message)
+		span.RecordError(err,
+			trace.WithAttributes(
+				attribute.Int("alerting.aggregation_group.count", d.aggrGroupsNum),
+				attribute.Int("alerting.aggregation_group.limit", limit),
+			),
+		)
+		if d.alertLCObserver != nil {
+			d.alertLCObserver.Observe(alertobserver.EventAlertFailedAddToAggrGroup, []*types.Alert{alert}, alertobserver.AlertEventMeta{"msg": err.Error()})
+		}
 		return
 	}
 
@@ -398,6 +427,20 @@ func (d *Dispatcher) processAlert(alert *types.Alert, route *Route) {
 	routeGroups[fp] = ag
 	d.aggrGroupsNum++
 	d.metrics.aggrGroups.Inc()
+	span.AddEvent("new AggregationGroup created",
+		trace.WithAttributes(
+			attribute.String("alerting.aggregation_group.key", ag.GroupKey()),
+			attribute.Int("alerting.aggregation_group.count", d.aggrGroupsNum),
+		),
+	)
+	if d.alertLCObserver != nil {
+		m := alertobserver.AlertEventMeta{
+			"groupKey": ag.GroupKey(),
+			"routeId":  ag.routeID,
+			"groupId":  ag.GroupID(),
+		}
+		d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+	}
 
 	// Insert the 1st alert in the group before starting the group's run()
 	// function, to make sure that when the run() will be executed the 1st
@@ -515,6 +558,7 @@ func (ag *aggrGroup) run(nf notifyFunc) {
 
 			// Populate context with information needed along the pipeline.
 			ctx = notify.WithGroupKey(ctx, ag.GroupKey())
+			ctx = notify.WithGroupId(ctx, ag.GroupID())
 			ctx = notify.WithGroupLabels(ctx, ag.labels)
 			ctx = notify.WithReceiverName(ctx, ag.opts.Receiver)
 			ctx = notify.WithRepeatInterval(ctx, ag.opts.RepeatInterval)
