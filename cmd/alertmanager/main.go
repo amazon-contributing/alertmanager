@@ -497,6 +497,7 @@ func run() int {
 			marker,
 			notificationLog,
 			pipelinePeer,
+			nil,
 		)
 
 		configuredReceivers.Set(float64(len(activeReceivers)))
@@ -518,6 +519,7 @@ func run() int {
 			nil,
 			logger,
 			dispMetrics,
+			nil,
 		)
 		routes.Walk(func(r *dispatch.Route) {
 			if r.RouteOpts.RepeatInterval > *retention {
