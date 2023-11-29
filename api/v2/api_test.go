@@ -16,6 +16,7 @@ package v2
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -26,10 +27,13 @@ import (
 	"github.com/go-openapi/runtime"
 	"github.com/go-openapi/runtime/middleware"
 	"github.com/go-openapi/strfmt"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/prometheus/alertmanager/alertobserver"
+	"github.com/prometheus/alertmanager/api/metrics"
 	alert_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	alertgroup_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroup"
 	alertgroupinfolist_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroupinfolist"
@@ -231,7 +235,7 @@ func TestGetAlertGroupInfosHandler(t *testing.T) {
 			alertGroupInfos: func(f func(*dispatch.Route) bool) dispatch.AlertGroupInfos {
 				return aginfos
 			},
-			logger: log.NewNopLogger(),
+			logger: promslog.NewNopLogger(),
 		}
 		r, err := http.NewRequest("GET", "/api/v2/alertgroups", nil)
 		require.NoError(t, err)
@@ -820,7 +824,7 @@ func TestListAlertsHandler(t *testing.T) {
 			api := API{
 				uptime:         time.Now(),
 				getAlertStatus: newGetAlertStatus(alertsProvider),
-				logger:         log.NewNopLogger(),
+				logger:         promslog.NewNopLogger(),
 				apiCallback:    tc.callback,
 				alerts:         alertsProvider,
 				setAlertStatus: func(model.LabelSet) {},
@@ -934,7 +938,7 @@ func TestGetAlertGroupsHandler(t *testing.T) {
 					return aginfos, nil
 				},
 				getAlertStatus: getAlertStatus,
-				logger:         log.NewNopLogger(),
+				logger:         promslog.NewNopLogger(),
 				apiCallback:    tc.callback,
 			}
 			r, err := http.NewRequest("GET", "/api/v2/alertgroups", nil)
@@ -1139,7 +1143,7 @@ func TestListAlertInfosHandler(t *testing.T) {
 			api := API{
 				uptime:         time.Now(),
 				getAlertStatus: newGetAlertStatus(alertsProvider),
-				logger:         log.NewNopLogger(),
+				logger:         promslog.NewNopLogger(),
 				alerts:         alertsProvider,
 				alertGroups: func(f func(*dispatch.Route) bool, f2 func(*types.Alert, time.Time) bool, f3 func(string) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string) {
 					return ags, nil
@@ -1192,6 +1196,67 @@ func TestListAlertInfosHandler(t *testing.T) {
 			require.Equal(t, tc.anames, anames)
 			require.Equal(t, tc.expectNextToken, response.NextToken)
 		})
+	}
+}
+
+func TestPostAlertHandler(t *testing.T) {
+	now := time.Now()
+	for i, tc := range []struct {
+		start, end time.Time
+		err        bool
+		code       int
+	}{
+		{time.Time{}, time.Time{}, false, 200},
+		{now, time.Time{}, false, 200},
+		{time.Time{}, now.Add(time.Duration(-1) * time.Second), false, 200},
+		{time.Time{}, now, false, 200},
+		{time.Time{}, now.Add(time.Duration(1) * time.Second), false, 200},
+		{now.Add(time.Duration(-2) * time.Second), now.Add(time.Duration(-1) * time.Second), false, 200},
+		{now.Add(time.Duration(1) * time.Second), now.Add(time.Duration(2) * time.Second), false, 200},
+		{now.Add(time.Duration(1) * time.Second), now, false, 400},
+	} {
+		alerts, alertsBytes := createAlert(t, tc.start, tc.end)
+		api := API{
+			uptime: time.Now(),
+			alerts: newFakeAlerts([]*types.Alert{}),
+			logger: promslog.NewNopLogger(),
+			m:      metrics.NewAlerts(prometheus.NewRegistry()),
+		}
+		api.Update(&config.Config{
+			Global: &config.GlobalConfig{
+				ResolveTimeout: model.Duration(5),
+			},
+			Route: &config.Route{},
+		}, nil)
+
+		r, err := http.NewRequest("POST", "/api/v2/alerts", bytes.NewReader(alertsBytes))
+		require.NoError(t, err)
+
+		w := httptest.NewRecorder()
+		p := runtime.TextProducer()
+		responder := api.postAlertsHandler(alert_ops.PostAlertsParams{
+			HTTPRequest: r,
+			Alerts:      alerts,
+		})
+		responder.WriteResponse(w, p)
+		body, _ := io.ReadAll(w.Result().Body)
+
+		require.Equal(t, tc.code, w.Code, fmt.Sprintf("test case: %d, response: %s", i, string(body)))
+
+		observer := alertobserver.NewFakeLifeCycleObserver()
+		api.alertLCObserver = observer
+		r, err = http.NewRequest("POST", "/api/v2/alerts", bytes.NewReader(alertsBytes))
+		require.NoError(t, err)
+		api.postAlertsHandler(alert_ops.PostAlertsParams{
+			HTTPRequest: r,
+			Alerts:      alerts,
+		})
+		amAlert := OpenAPIAlertsToAlerts(alerts)
+		if tc.code == 200 {
+			require.Equal(t, observer.AlertsPerEvent[alertobserver.EventAlertReceived][0].Fingerprint(), amAlert[0].Fingerprint())
+		} else {
+			require.Equal(t, observer.AlertsPerEvent[alertobserver.EventAlertRejected][0].Fingerprint(), amAlert[0].Fingerprint())
+		}
 	}
 }
 
