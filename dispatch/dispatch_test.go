@@ -405,6 +405,8 @@ route:
 			return true
 		}, func(*types.Alert, time.Time) bool {
 			return true
+		}, func(string) bool {
+			return true
 		},
 	)
 
@@ -545,8 +547,9 @@ route:
 
 	routeFilter := func(*Route) bool { return true }
 	alertFilter := func(*types.Alert, time.Time) bool { return true }
+	groupFilter := func(string) bool { return true }
 
-	alertGroups, _ := dispatcher.Groups(routeFilter, alertFilter)
+	alertGroups, _ := dispatcher.Groups(routeFilter, alertFilter, groupFilter)
 	require.Len(t, alertGroups, 6)
 
 	require.Equal(t, 0.0, testutil.ToFloat64(m.aggrGroupLimitReached))
@@ -564,8 +567,163 @@ route:
 	require.Equal(t, 1.0, testutil.ToFloat64(m.aggrGroupLimitReached))
 
 	// Verify there are still only 6 groups.
-	alertGroups, _ = dispatcher.Groups(routeFilter, alertFilter)
+	alertGroups, _ = dispatcher.Groups(routeFilter, alertFilter, groupFilter)
 	require.Len(t, alertGroups, 6)
+}
+
+func TestGroupInfos(t *testing.T) {
+	confData := `receivers:
+- name: 'kafka'
+- name: 'prod'
+- name: 'testing'
+
+route:
+  group_by: ['alertname']
+  group_wait: 10ms
+  group_interval: 10ms
+  receiver: 'prod'
+  routes:
+  - match:
+      env: 'testing'
+    receiver: 'testing'
+    group_by: ['alertname', 'service']
+  - match:
+      env: 'prod'
+    receiver: 'prod'
+    group_by: ['alertname', 'service', 'cluster']
+    continue: true
+  - match:
+      kafka: 'yes'
+    receiver: 'kafka'
+    group_by: ['alertname', 'service', 'cluster']`
+	conf, err := config.Load(confData)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	logger := log.NewNopLogger()
+	route := NewRoute(conf.Route, nil)
+	marker := types.NewMarker(prometheus.NewRegistry())
+	alerts, err := mem.NewAlerts(context.Background(), marker, time.Hour, nil, logger, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alerts.Close()
+
+	timeout := func(d time.Duration) time.Duration { return time.Duration(0) }
+	recorder := &recordStage{alerts: make(map[string]map[model.Fingerprint]*types.Alert)}
+	dispatcher := NewDispatcher(alerts, route, recorder, marker, timeout, nil, logger, NewDispatcherMetrics(false, prometheus.NewRegistry()))
+	go dispatcher.Run()
+	defer dispatcher.Stop()
+
+	// Create alerts. the dispatcher will automatically create the groups.
+	inputAlerts := []*types.Alert{
+		// Matches the parent route.
+		newAlert(model.LabelSet{"alertname": "OtherAlert", "cluster": "cc", "service": "dd"}),
+		// Matches the first sub-route.
+		newAlert(model.LabelSet{"env": "testing", "alertname": "TestingAlert", "service": "api", "instance": "inst1"}),
+		// Matches the second sub-route.
+		newAlert(model.LabelSet{"env": "prod", "alertname": "HighErrorRate", "cluster": "aa", "service": "api", "instance": "inst1"}),
+		newAlert(model.LabelSet{"env": "prod", "alertname": "HighErrorRate", "cluster": "aa", "service": "api", "instance": "inst2"}),
+		// Matches the second sub-route.
+		newAlert(model.LabelSet{"env": "prod", "alertname": "HighErrorRate", "cluster": "bb", "service": "api", "instance": "inst1"}),
+		// Matches the second and third sub-route.
+		newAlert(model.LabelSet{"env": "prod", "alertname": "HighLatency", "cluster": "bb", "service": "db", "kafka": "yes", "instance": "inst3"}),
+	}
+	alerts.Put(inputAlerts...)
+
+	// Let alerts get processed.
+	for i := 0; len(recorder.Alerts()) != 7 && i < 10; i++ {
+		time.Sleep(200 * time.Millisecond)
+	}
+	require.Equal(t, 7, len(recorder.Alerts()))
+
+	alertGroupInfos := dispatcher.GroupInfos(
+		func(*Route) bool {
+			return true
+		},
+	)
+
+	require.Equal(t, AlertGroupInfos{
+		&AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "TestingAlert",
+				"service":   "api",
+			},
+			Receiver: "testing",
+			// Matches the first sub-route.
+			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[0]][model.LabelSet{
+				"alertname": "TestingAlert",
+				"service":   "api",
+			}.Fingerprint()].GroupID(),
+		},
+		&AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "HighLatency",
+				"service":   "db",
+				"cluster":   "bb",
+			},
+			Receiver: "kafka",
+			// Matches the third sub-route.
+			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[2]][model.LabelSet{
+				"alertname": "HighLatency",
+				"service":   "db",
+				"cluster":   "bb",
+			}.Fingerprint()].GroupID(),
+		},
+		&AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "HighErrorRate",
+				"service":   "api",
+				"cluster":   "bb",
+			},
+			Receiver: "prod",
+			// Matches the second sub-route.
+			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[1]][model.LabelSet{
+				"alertname": "HighErrorRate",
+				"service":   "api",
+				"cluster":   "bb",
+			}.Fingerprint()].GroupID(),
+		},
+		&AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "HighLatency",
+				"service":   "db",
+				"cluster":   "bb",
+			},
+			Receiver: "prod",
+			// Matches the second sub-route.
+			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[1]][model.LabelSet{
+				"alertname": "HighLatency",
+				"service":   "db",
+				"cluster":   "bb",
+			}.Fingerprint()].GroupID(),
+		},
+		&AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "OtherAlert",
+			},
+			Receiver: "prod",
+			// Matches the parent route.
+			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route][model.LabelSet{
+				"alertname": "OtherAlert",
+			}.Fingerprint()].GroupID(),
+		},
+		&AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "HighErrorRate",
+				"service":   "api",
+				"cluster":   "aa",
+			},
+			Receiver: "prod",
+			// Matches the second sub-route.
+			ID: dispatcher.aggrGroupsPerRoute[dispatcher.route.Routes[1]][model.LabelSet{
+				"alertname": "HighErrorRate",
+				"service":   "api",
+				"cluster":   "aa",
+			}.Fingerprint()].GroupID(),
+		},
+	}, alertGroupInfos)
 }
 
 type recordStage struct {

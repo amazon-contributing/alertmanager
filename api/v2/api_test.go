@@ -15,6 +15,7 @@ package v2
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,13 @@ import (
 	"github.com/go-openapi/strfmt"
 	"github.com/prometheus/common/model"
 	"github.com/stretchr/testify/require"
+
+	alert_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
+	alertgroup_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroup"
+	alertgroupinfolist_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroupinfolist"
+	alert_info_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertinfo"
+	"github.com/prometheus/alertmanager/dispatch"
+	"github.com/prometheus/alertmanager/util/callback"
 
 	open_api_models "github.com/prometheus/alertmanager/api/v2/models"
 	general_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/general"
@@ -117,6 +125,130 @@ func gettableSilence(id, state string,
 		Status: &open_api_models.SilenceStatus{
 			State: &state,
 		},
+	}
+}
+
+func TestGetAlertGroupInfosHandler(t *testing.T) {
+	aginfos := dispatch.AlertGroupInfos{
+		&dispatch.AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "TestingAlert",
+				"service":   "api",
+			},
+			Receiver: "testing",
+			ID:       "478b4114226224a35910d449fdba8186ebfb441f",
+		},
+		&dispatch.AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "HighErrorRate",
+				"service":   "api",
+				"cluster":   "bb",
+			},
+			Receiver: "prod",
+			ID:       "7f4084a078a3fe29d6de82fad15af8f1411e803f",
+		},
+		&dispatch.AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "OtherAlert",
+			},
+			Receiver: "prod",
+			ID:       "d525244929240cbdb75a497913c1890ab8de1962",
+		},
+		&dispatch.AlertGroupInfo{
+			Labels: model.LabelSet{
+				"alertname": "HighErrorRate",
+				"service":   "api",
+				"cluster":   "aa",
+			},
+			Receiver: "prod",
+			ID:       "d73984d43949112ae1ea59dcc5af4af7b630a5b1",
+		},
+	}
+	for _, tc := range []struct {
+		maxResult    *int64
+		nextToken    *string
+		body         string
+		expectedCode int
+	}{
+		// Invalid next token.
+		{
+			convertIntToPointerInt64(int64(1)),
+			convertStringToPointer("$$$"),
+			`failed to parse NextToken param: $$$`,
+			400,
+		},
+		// Invalid next token.
+		{
+			convertIntToPointerInt64(int64(1)),
+			convertStringToPointer("1234s"),
+			`failed to parse NextToken param: 1234s`,
+			400,
+		},
+		// Invalid MaxResults.
+		{
+			convertIntToPointerInt64(int64(-1)),
+			convertStringToPointer("478b4114226224a35910d449fdba8186ebfb441f"),
+			`failed to parse MaxResults param: -1`,
+			400,
+		},
+		// One item to return, no next token.
+		{
+			convertIntToPointerInt64(int64(1)),
+			nil,
+			`{"alertGroupInfoList":[{"id":"478b4114226224a35910d449fdba8186ebfb441f","labels":{"alertname":"TestingAlert","service":"api"},"receiver":{"name":"testing"}}],"nextToken":"478b4114226224a35910d449fdba8186ebfb441f"}`,
+			200,
+		},
+		// One item to return, has next token.
+		{
+			convertIntToPointerInt64(int64(1)),
+			convertStringToPointer("478b4114226224a35910d449fdba8186ebfb441f"),
+			`{"alertGroupInfoList":[{"id":"7f4084a078a3fe29d6de82fad15af8f1411e803f","labels":{"alertname":"HighErrorRate","cluster":"bb","service":"api"},"receiver":{"name":"prod"}}],"nextToken":"7f4084a078a3fe29d6de82fad15af8f1411e803f"}`,
+			200,
+		},
+		// Five item to return, has next token.
+		{
+			convertIntToPointerInt64(int64(5)),
+			convertStringToPointer("7f4084a078a3fe29d6de82fad15af8f1411e803f"),
+			`{"alertGroupInfoList":[{"id":"d525244929240cbdb75a497913c1890ab8de1962","labels":{"alertname":"OtherAlert"},"receiver":{"name":"prod"}},{"id":"d73984d43949112ae1ea59dcc5af4af7b630a5b1","labels":{"alertname":"HighErrorRate","cluster":"aa","service":"api"},"receiver":{"name":"prod"}}]}`,
+			200,
+		},
+		// Return all results.
+		{
+			nil,
+			nil,
+			`{"alertGroupInfoList":[{"id":"478b4114226224a35910d449fdba8186ebfb441f","labels":{"alertname":"TestingAlert","service":"api"},"receiver":{"name":"testing"}},{"id":"7f4084a078a3fe29d6de82fad15af8f1411e803f","labels":{"alertname":"HighErrorRate","cluster":"bb","service":"api"},"receiver":{"name":"prod"}},{"id":"d525244929240cbdb75a497913c1890ab8de1962","labels":{"alertname":"OtherAlert"},"receiver":{"name":"prod"}},{"id":"d73984d43949112ae1ea59dcc5af4af7b630a5b1","labels":{"alertname":"HighErrorRate","cluster":"aa","service":"api"},"receiver":{"name":"prod"}}]}`,
+			200,
+		},
+		// return 0 result
+		{
+			convertIntToPointerInt64(int64(0)),
+			nil,
+			`{"alertGroupInfoList":[]}`,
+			200,
+		},
+	} {
+		api := API{
+			uptime: time.Now(),
+			alertGroupInfos: func(f func(*dispatch.Route) bool) dispatch.AlertGroupInfos {
+				return aginfos
+			},
+			logger: log.NewNopLogger(),
+		}
+		r, err := http.NewRequest("GET", "/api/v2/alertgroups", nil)
+		require.NoError(t, err)
+
+		w := httptest.NewRecorder()
+		p := runtime.TextProducer()
+		responder := api.getAlertGroupInfoListHandler(alertgroupinfolist_ops.GetAlertGroupInfoListParams{
+			MaxResults:  tc.maxResult,
+			NextToken:   tc.nextToken,
+			HTTPRequest: r,
+		})
+		responder.WriteResponse(w, p)
+		body, _ := io.ReadAll(w.Result().Body)
+
+		require.Equal(t, tc.expectedCode, w.Code)
+		require.Equal(t, tc.body, string(body))
 	}
 }
 
@@ -509,4 +641,514 @@ receivers:
 		require.Equal(t, tc.expectedCode, w.Code)
 		require.Equal(t, tc.body, string(body))
 	}
+}
+
+func TestListAlertsHandler(t *testing.T) {
+	now := time.Now()
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "active", "alertname": "alert1"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "unprocessed", "alertname": "alert2"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "suppressed", "silenced_by": "abc", "alertname": "alert3"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "suppressed", "inhibited_by": "abc", "alertname": "alert4"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"alertname": "alert5"},
+				StartsAt: now.Add(-2 * time.Minute),
+				EndsAt:   now.Add(-time.Minute),
+			},
+		},
+	}
+
+	for _, tc := range []struct {
+		name          string
+		booleanParams map[string]*bool
+		expectedCode  int
+		anames        []string
+		callback      callback.Callback
+	}{
+		{
+			"no call back, no filter",
+			map[string]*bool{},
+			200,
+			[]string{"alert1", "alert2", "alert3", "alert4"},
+			callback.NoopAPICallback{},
+		},
+		{
+			"callback: only return 1 alert, no filter",
+			map[string]*bool{},
+			200,
+			[]string{"alert1"},
+			limitNumberOfAlertsReturnedCallback{limit: 1},
+		},
+		{
+			"callback: only return 3 alert, no filter",
+			map[string]*bool{},
+			200,
+			[]string{"alert1", "alert2", "alert3"},
+			limitNumberOfAlertsReturnedCallback{limit: 3},
+		},
+		{
+			"no filter",
+			map[string]*bool{},
+			200,
+			[]string{"alert1", "alert2", "alert3", "alert4"},
+			callback.NoopAPICallback{},
+		},
+		{
+			"status filter",
+			map[string]*bool{"active": BoolPointer(true), "silenced": BoolPointer(true), "inhibited": BoolPointer(true)},
+			200,
+			[]string{"alert1", "alert2", "alert3", "alert4"},
+			callback.NoopAPICallback{},
+		},
+		{
+			"status filter - active false",
+			map[string]*bool{"active": BoolPointer(false), "silenced": BoolPointer(true), "inhibited": BoolPointer(true)},
+			200,
+			[]string{"alert2", "alert3", "alert4"},
+			callback.NoopAPICallback{},
+		},
+		{
+			"status filter - silenced false",
+			map[string]*bool{"active": BoolPointer(true), "silenced": BoolPointer(false), "inhibited": BoolPointer(true)},
+			200,
+			[]string{"alert1", "alert2", "alert4"},
+			callback.NoopAPICallback{},
+		},
+		{
+			"status filter - inhibited false",
+			map[string]*bool{"active": BoolPointer(true), "unprocessed": BoolPointer(true), "silenced": BoolPointer(true), "inhibited": BoolPointer(false)},
+			200,
+			[]string{"alert1", "alert2", "alert3"},
+			callback.NoopAPICallback{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			alertsProvider := newFakeAlerts(alerts)
+			api := API{
+				uptime:         time.Now(),
+				getAlertStatus: newGetAlertStatus(alertsProvider),
+				logger:         log.NewNopLogger(),
+				apiCallback:    tc.callback,
+				alerts:         alertsProvider,
+				setAlertStatus: func(model.LabelSet) {},
+			}
+			api.route = dispatch.NewRoute(&config.Route{Receiver: "def-receiver"}, nil)
+			r, err := http.NewRequest("GET", "/api/v2/alerts", nil)
+			require.NoError(t, err)
+
+			w := httptest.NewRecorder()
+			p := runtime.TextProducer()
+			silence := tc.booleanParams["silenced"]
+			if silence == nil {
+				silence = BoolPointer(true)
+			}
+			inhibited := tc.booleanParams["inhibited"]
+			if inhibited == nil {
+				inhibited = BoolPointer(true)
+			}
+			active := tc.booleanParams["active"]
+			if active == nil {
+				active = BoolPointer(true)
+			}
+			responder := api.getAlertsHandler(alert_ops.GetAlertsParams{
+				HTTPRequest: r,
+				Silenced:    silence,
+				Inhibited:   inhibited,
+				Active:      active,
+			})
+			responder.WriteResponse(w, p)
+			body, _ := io.ReadAll(w.Result().Body)
+
+			require.Equal(t, tc.expectedCode, w.Code)
+			retAlerts := open_api_models.GettableAlerts{}
+			err = json.Unmarshal(body, &retAlerts)
+			if err != nil {
+				t.Fatalf("Unexpected error %v", err)
+			}
+			anames := []string{}
+			for _, a := range retAlerts {
+				name, ok := a.Labels["alertname"]
+				if ok {
+					anames = append(anames, string(name))
+				}
+			}
+			require.Equal(t, tc.anames, anames)
+		})
+	}
+}
+
+func TestGetAlertGroupsHandler(t *testing.T) {
+	var startAt time.Time
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "active", "alertname": "alert1"},
+				StartsAt: startAt,
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "unprocessed", "alertname": "alert2"},
+				StartsAt: startAt,
+			},
+		},
+	}
+	aginfos := dispatch.AlertGroups{
+		&dispatch.AlertGroup{
+			Labels: model.LabelSet{
+				"alertname": "TestingAlert",
+			},
+			Receiver: "testing",
+			Alerts:   alerts[:1],
+		},
+		&dispatch.AlertGroup{
+			Labels: model.LabelSet{
+				"alertname": "HighErrorRate",
+			},
+			Receiver: "prod",
+			Alerts:   alerts[:2],
+		},
+	}
+	for _, tc := range []struct {
+		name         string
+		numberOfAG   int
+		expectedCode int
+		callback     callback.Callback
+	}{
+		{
+			"no call back",
+			2,
+			200,
+			callback.NoopAPICallback{},
+		},
+		{
+			"callback: only return 1 alert group",
+			1,
+			200,
+			limitNumberOfAlertsReturnedCallback{limit: 1},
+		},
+		{
+			"callback: only return 2 alert group",
+			2,
+			200,
+			limitNumberOfAlertsReturnedCallback{limit: 2},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := API{
+				uptime: time.Now(),
+				alertGroups: func(f func(*dispatch.Route) bool, f2 func(*types.Alert, time.Time) bool, f3 func(string) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string) {
+					return aginfos, nil
+				},
+				getAlertStatus: getAlertStatus,
+				logger:         log.NewNopLogger(),
+				apiCallback:    tc.callback,
+			}
+			r, err := http.NewRequest("GET", "/api/v2/alertgroups", nil)
+			require.NoError(t, err)
+
+			w := httptest.NewRecorder()
+			p := runtime.TextProducer()
+			silence := false
+			inhibited := false
+			active := true
+			responder := api.getAlertGroupsHandler(alertgroup_ops.GetAlertGroupsParams{
+				HTTPRequest: r,
+				Silenced:    &silence,
+				Inhibited:   &inhibited,
+				Active:      &active,
+			})
+			responder.WriteResponse(w, p)
+			body, _ := io.ReadAll(w.Result().Body)
+
+			require.Equal(t, tc.expectedCode, w.Code)
+			retAlertGroups := open_api_models.AlertGroups{}
+			err = json.Unmarshal(body, &retAlertGroups)
+			if err != nil {
+				t.Fatalf("Unexpected error %v", err)
+			}
+			require.Equal(t, tc.numberOfAG, len(retAlertGroups))
+		})
+	}
+}
+
+func TestListAlertInfosHandler(t *testing.T) {
+	now := time.Now()
+	alerts := []*types.Alert{
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "active", "alertname": "alert1"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "unprocessed", "alertname": "alert2"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "suppressed", "silenced_by": "abc", "alertname": "alert3"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+		{
+			Alert: model.Alert{
+				Labels:   model.LabelSet{"state": "suppressed", "inhibited_by": "abc", "alertname": "alert4"},
+				StartsAt: now.Add(-time.Minute),
+			},
+		},
+	}
+	ags := dispatch.AlertGroups{
+		&dispatch.AlertGroup{
+			Labels: model.LabelSet{
+				"alertname": "TestingAlert",
+				"service":   "api",
+			},
+			Receiver: "testing",
+			Alerts:   []*types.Alert{alerts[0], alerts[1]},
+		},
+		&dispatch.AlertGroup{
+			Labels: model.LabelSet{
+				"alertname": "HighErrorRate",
+				"service":   "api",
+				"cluster":   "bb",
+			},
+			Receiver: "prod",
+			Alerts:   []*types.Alert{alerts[2], alerts[3]},
+		},
+	}
+
+	for _, tc := range []struct {
+		name            string
+		booleanParams   map[string]*bool
+		groupsFilter    []string
+		expectedCode    int
+		maxResult       *int64
+		nextToken       *string
+		anames          []string
+		expectNextToken string
+	}{
+		{
+			"no filter",
+			map[string]*bool{},
+			[]string{},
+			200,
+			nil,
+			nil,
+			[]string{"alert1", "alert2", "alert3", "alert4"},
+			"",
+		},
+		{
+			"status filter",
+			map[string]*bool{"active": BoolPointer(true), "silenced": BoolPointer(true), "inhibited": BoolPointer(true)},
+			[]string{},
+			200,
+			nil,
+			nil,
+			[]string{"alert1", "alert2", "alert3", "alert4"},
+			"",
+		},
+		{
+			"status filter - active false",
+			map[string]*bool{"active": BoolPointer(false), "silenced": BoolPointer(true), "inhibited": BoolPointer(true)},
+			[]string{},
+			200,
+			nil,
+			nil,
+			[]string{"alert2", "alert3", "alert4"},
+			"",
+		},
+		{
+			"status filter - silenced false",
+			map[string]*bool{"active": BoolPointer(true), "silenced": BoolPointer(false), "inhibited": BoolPointer(true)},
+			[]string{},
+			200,
+			nil,
+			nil,
+			[]string{"alert1", "alert2", "alert4"},
+			"",
+		},
+		{
+			"status filter - inhibited false",
+			map[string]*bool{"active": BoolPointer(true), "unprocessed": BoolPointer(true), "silenced": BoolPointer(true), "inhibited": BoolPointer(false)},
+			[]string{},
+			200,
+			nil,
+			nil,
+			[]string{"alert1", "alert2", "alert3"},
+			"",
+		},
+		{
+			"group filter",
+			map[string]*bool{"active": BoolPointer(true), "unprocessed": BoolPointer(true), "silenced": BoolPointer(true), "inhibited": BoolPointer(true)},
+			[]string{"123"},
+			200,
+			nil,
+			nil,
+			[]string{"alert1", "alert2", "alert3", "alert4"},
+			"",
+		},
+		{
+			"MaxResults - only 1 alert return",
+			map[string]*bool{},
+			[]string{},
+			200,
+			convertIntToPointerInt64(int64(1)),
+			nil,
+			[]string{"alert1"},
+			alerts[0].Fingerprint().String(),
+		},
+		{
+			"MaxResults - 0 alert return",
+			map[string]*bool{},
+			[]string{},
+			200,
+			convertIntToPointerInt64(int64(0)),
+			nil,
+			[]string{},
+			"",
+		},
+		{
+			"MaxResults - all alert return",
+			map[string]*bool{},
+			[]string{},
+			200,
+			convertIntToPointerInt64(int64(8)),
+			nil,
+			[]string{"alert1", "alert2", "alert3", "alert4"},
+			"",
+		},
+		{
+			"MaxResults - has begin next token, max 2 alerts",
+			map[string]*bool{},
+			[]string{},
+			200,
+			convertIntToPointerInt64(int64(2)),
+			convertStringToPointer(alerts[0].Fingerprint().String()),
+			[]string{"alert2", "alert3"},
+			alerts[2].Fingerprint().String(),
+		},
+		{
+			"MaxResults - has begin next token, max 2 alerts, no response next token",
+			map[string]*bool{},
+			[]string{},
+			200,
+			convertIntToPointerInt64(int64(2)),
+			convertStringToPointer(alerts[1].Fingerprint().String()),
+			[]string{"alert3", "alert4"},
+			"",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			alertsProvider := newFakeAlerts(alerts)
+			api := API{
+				uptime:         time.Now(),
+				getAlertStatus: newGetAlertStatus(alertsProvider),
+				logger:         log.NewNopLogger(),
+				alerts:         alertsProvider,
+				alertGroups: func(f func(*dispatch.Route) bool, f2 func(*types.Alert, time.Time) bool, f3 func(string) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string) {
+					return ags, nil
+				},
+				setAlertStatus: func(model.LabelSet) {},
+			}
+			api.route = dispatch.NewRoute(&config.Route{Receiver: "def-receiver"}, nil)
+			r, err := http.NewRequest("GET", "/api/v2/alertinfos", nil)
+			require.NoError(t, err)
+
+			w := httptest.NewRecorder()
+			p := runtime.TextProducer()
+			silence := tc.booleanParams["silenced"]
+			if silence == nil {
+				silence = BoolPointer(true)
+			}
+			inhibited := tc.booleanParams["inhibited"]
+			if inhibited == nil {
+				inhibited = BoolPointer(true)
+			}
+			active := tc.booleanParams["active"]
+			if active == nil {
+				active = BoolPointer(true)
+			}
+			responder := api.getAlertInfosHandler(alert_info_ops.GetAlertInfosParams{
+				HTTPRequest: r,
+				Silenced:    silence,
+				Inhibited:   inhibited,
+				Active:      active,
+				GroupID:     tc.groupsFilter,
+				MaxResults:  tc.maxResult,
+				NextToken:   tc.nextToken,
+			})
+			responder.WriteResponse(w, p)
+			body, _ := io.ReadAll(w.Result().Body)
+
+			require.Equal(t, tc.expectedCode, w.Code)
+			response := open_api_models.GettableAlertInfos{}
+			err = json.Unmarshal(body, &response)
+			if err != nil {
+				t.Fatalf("Unexpected error %v", err)
+			}
+			anames := []string{}
+			for _, a := range response.Alerts {
+				name, ok := a.Labels["alertname"]
+				if ok {
+					anames = append(anames, string(name))
+				}
+			}
+			require.Equal(t, tc.anames, anames)
+			require.Equal(t, tc.expectNextToken, response.NextToken)
+		})
+	}
+}
+
+type limitNumberOfAlertsReturnedCallback struct {
+	limit int
+}
+
+func (n limitNumberOfAlertsReturnedCallback) V2GetAlertsCallback(alerts open_api_models.GettableAlerts) (open_api_models.GettableAlerts, error) {
+	return alerts[:n.limit], nil
+}
+
+func (n limitNumberOfAlertsReturnedCallback) V2GetAlertGroupsCallback(alertgroups open_api_models.AlertGroups) (open_api_models.AlertGroups, error) {
+	return alertgroups[:n.limit], nil
+}
+
+func getAlertStatus(model.Fingerprint) types.AlertStatus {
+	status := types.AlertStatus{SilencedBy: []string{}, InhibitedBy: []string{}}
+	status.State = types.AlertStateActive
+	return status
+}
+
+func BoolPointer(b bool) *bool {
+	return &b
+}
+
+func convertIntToPointerInt64(x int64) *int64 {
+	return &x
+}
+
+func convertStringToPointer(x string) *string {
+	return &x
 }

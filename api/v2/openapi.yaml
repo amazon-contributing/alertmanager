@@ -199,6 +199,74 @@ paths:
           $ref: '#/responses/InternalServerError'
         '400':
           $ref: '#/responses/BadRequest'
+
+  /alertinfos:
+    get:
+      tags:
+        - alertinfo
+      operationId: getAlertInfos
+      description: Get a list of alert infos
+      parameters:
+        - in: query
+          name: active
+          type: boolean
+          description: Show active alerts
+          default: true
+        - in: query
+          name: silenced
+          type: boolean
+          description: Show silenced alerts
+          default: true
+        - in: query
+          name: inhibited
+          type: boolean
+          description: Show inhibited alerts
+          default: true
+        - in: query
+          name: unprocessed
+          type: boolean
+          description: Show unprocessed alerts
+          default: true
+        - name: filter
+          in: query
+          description: A list of matchers to filter alerts by
+          required: false
+          type: array
+          collectionFormat: multi
+          items:
+            type: string
+        - name: receiver
+          in: query
+          description: A regex matching receivers to filter alerts by
+          required: false
+          type: string
+        - name: groupId
+          in: query
+          description: A list of group IDs to filter alerts by
+          required: false
+          type: array
+          collectionFormat: multi
+          items:
+            type: string
+        - name: nextToken
+          in: query
+          description: The token for the next set of items to return
+          required: false
+          type: string
+        - name: maxResults
+          in: query
+          description: The maximum number of alert to return in one getAlertInfos operation.
+          required: false
+          type: integer
+      responses:
+        '200':
+          description: Get alerts response
+          schema:
+            '$ref': '#/definitions/gettableAlertInfos'
+        '400':
+          $ref: '#/responses/BadRequest'
+        '500':
+          $ref: '#/responses/InternalServerError'
   /alerts/groups:
     get:
       tags:
@@ -239,6 +307,37 @@ paths:
           description: Get alert groups response
           schema:
             '$ref': '#/definitions/alertGroups'
+        '400':
+          $ref: '#/responses/BadRequest'
+        '500':
+          $ref: '#/responses/InternalServerError'
+  /alertgroups:
+    get:
+      tags:
+        - alertgroupinfolist
+      operationId: getAlertGroupInfoList
+      description: Get a list of alert groups information
+      parameters:
+        - name: receiver
+          in: query
+          description: A regex matching receivers to filter alerts by
+          required: false
+          type: string
+        - name: nextToken
+          in: query
+          description: The token for the next set of items to return
+          required: false
+          type: string
+        - name: maxResults
+          in: query
+          description: The maximum number of alert groups to return in one getAlertGroupInfoList operation.
+          required: false
+          type: integer
+      responses:
+        '200':
+          description: Get alert groups info response
+          schema:
+            '$ref': '#/definitions/alertGroupInfoList'
         '400':
           $ref: '#/responses/BadRequest'
         '500':
@@ -417,6 +516,15 @@ definitions:
     type: array
     items:
       $ref: '#/definitions/gettableAlert'
+  gettableAlertInfos:
+    type: object
+    properties:
+      alerts:
+        type: array
+        items:
+          $ref: '#/definitions/gettableAlert'
+      nextToken:
+        type: string
   gettableAlert:
     allOf:
       - type: object
@@ -485,6 +593,28 @@ definitions:
       - labels
       - receiver
       - alerts
+  alertGroupInfoList:
+    type: object
+    properties:
+      alertGroupInfoList:
+        type: array
+        items:
+          $ref: '#/definitions/alertGroupInfo'
+      nextToken:
+        type: string
+  alertGroupInfo:
+    type: object
+    properties:
+      labels:
+        $ref: '#/definitions/labelSet'
+      receiver:
+        $ref: '#/definitions/receiver'
+      id:
+        type: string
+    required:
+      - labels
+      - receiver
+      - id
   alertStatus:
     type: object
     properties:
