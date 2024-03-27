@@ -14,6 +14,8 @@
 package v2
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -32,12 +34,17 @@ import (
 	"github.com/prometheus/common/version"
 	"github.com/rs/cors"
 
+	alertgroupinfolist_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroupinfolist"
+	"github.com/prometheus/alertmanager/util/callback"
+
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/api/metrics"
 	open_api_models "github.com/prometheus/alertmanager/api/v2/models"
 	"github.com/prometheus/alertmanager/api/v2/restapi"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations"
 	alert_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	alertgroup_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroup"
+	alertinfo_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/alertinfo"
 	general_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/general"
 	receiver_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/receiver"
 	silence_ops "github.com/prometheus/alertmanager/api/v2/restapi/operations/silence"
@@ -53,12 +60,14 @@ import (
 
 // API represents an Alertmanager API v2
 type API struct {
-	peer           cluster.ClusterPeer
-	silences       *silence.Silences
-	alerts         provider.Alerts
-	alertGroups    groupsFn
-	getAlertStatus getAlertStatusFn
-	uptime         time.Time
+	peer            cluster.ClusterPeer
+	silences        *silence.Silences
+	alerts          provider.Alerts
+	alertGroups     groupsFn
+	alertGroupInfos groupInfosFn
+	getAlertStatus  getAlertStatusFn
+	apiCallback     callback.Callback
+	uptime          time.Time
 
 	// mtx protects alertmanagerConfig, setAlertStatus and route.
 	mtx sync.RWMutex
@@ -68,14 +77,16 @@ type API struct {
 	route              *dispatch.Route
 	setAlertStatus     setAlertStatusFn
 
-	logger log.Logger
-	m      *metrics.Alerts
+	logger          log.Logger
+	m               *metrics.Alerts
+	alertLCObserver alertobserver.LifeCycleObserver
 
 	Handler http.Handler
 }
 
 type (
-	groupsFn         func(func(*dispatch.Route) bool, func(*types.Alert, time.Time) bool) (dispatch.AlertGroups, map[prometheus_model.Fingerprint][]string)
+	groupsFn         func(func(*dispatch.Route) bool, func(*types.Alert, time.Time) bool, func(string) bool) (dispatch.AlertGroups, map[prometheus_model.Fingerprint][]string)
+	groupInfosFn     func(func(*dispatch.Route) bool) dispatch.AlertGroupInfos
 	getAlertStatusFn func(prometheus_model.Fingerprint) types.AlertStatus
 	setAlertStatusFn func(prometheus_model.LabelSet)
 )
@@ -84,21 +95,30 @@ type (
 func NewAPI(
 	alerts provider.Alerts,
 	gf groupsFn,
+	gif groupInfosFn,
 	sf getAlertStatusFn,
 	silences *silence.Silences,
+	apiCallback callback.Callback,
 	peer cluster.ClusterPeer,
 	l log.Logger,
 	r prometheus.Registerer,
+	o alertobserver.LifeCycleObserver,
 ) (*API, error) {
+	if apiCallback == nil {
+		apiCallback = callback.NoopAPICallback{}
+	}
 	api := API{
-		alerts:         alerts,
-		getAlertStatus: sf,
-		alertGroups:    gf,
-		peer:           peer,
-		silences:       silences,
-		logger:         l,
-		m:              metrics.NewAlerts("v2", r),
-		uptime:         time.Now(),
+		alerts:          alerts,
+		getAlertStatus:  sf,
+		alertGroups:     gf,
+		alertGroupInfos: gif,
+		peer:            peer,
+		silences:        silences,
+		apiCallback:     apiCallback,
+		logger:          l,
+		m:               metrics.NewAlerts("v2", r),
+		uptime:          time.Now(),
+		alertLCObserver: o,
 	}
 
 	// Load embedded swagger file.
@@ -120,8 +140,10 @@ func NewAPI(
 	}
 
 	openAPI.AlertGetAlertsHandler = alert_ops.GetAlertsHandlerFunc(api.getAlertsHandler)
+	openAPI.AlertinfoGetAlertInfosHandler = alertinfo_ops.GetAlertInfosHandlerFunc(api.getAlertInfosHandler)
 	openAPI.AlertPostAlertsHandler = alert_ops.PostAlertsHandlerFunc(api.postAlertsHandler)
 	openAPI.AlertgroupGetAlertGroupsHandler = alertgroup_ops.GetAlertGroupsHandlerFunc(api.getAlertGroupsHandler)
+	openAPI.AlertgroupinfolistGetAlertGroupInfoListHandler = alertgroupinfolist_ops.GetAlertGroupInfoListHandlerFunc(api.getAlertGroupInfoListHandler)
 	openAPI.GeneralGetStatusHandler = general_ops.GetStatusHandlerFunc(api.getStatusHandler)
 	openAPI.ReceiverGetReceiversHandler = receiver_ops.GetReceiversHandlerFunc(api.getReceiversHandler)
 	openAPI.SilenceDeleteSilenceHandler = silence_ops.DeleteSilenceHandlerFunc(api.deleteSilenceHandler)
@@ -233,10 +255,7 @@ func (api *API) getReceiversHandler(params receiver_ops.GetReceiversParams) midd
 func (api *API) getAlertsHandler(params alert_ops.GetAlertsParams) middleware.Responder {
 	var (
 		receiverFilter *regexp.Regexp
-		// Initialize result slice to prevent api returning `null` when there
-		// are no alerts present
-		res = open_api_models.GettableAlerts{}
-		ctx = params.HTTPRequest.Context()
+		ctx            = params.HTTPRequest.Context()
 
 		logger = api.requestLogger(params.HTTPRequest)
 	)
@@ -259,50 +278,87 @@ func (api *API) getAlertsHandler(params alert_ops.GetAlertsParams) middleware.Re
 		}
 	}
 
-	alerts := api.alerts.GetPending()
-	defer alerts.Close()
-
 	alertFilter := api.alertFilter(matchers, *params.Silenced, *params.Inhibited, *params.Active)
-	now := time.Now()
-
-	api.mtx.RLock()
-	for a := range alerts.Next() {
-		if err = alerts.Err(); err != nil {
-			break
-		}
-		if err = ctx.Err(); err != nil {
-			break
-		}
-
-		routes := api.route.Match(a.Labels)
-		receivers := make([]string, 0, len(routes))
-		for _, r := range routes {
-			receivers = append(receivers, r.RouteOpts.Receiver)
-		}
-
-		if receiverFilter != nil && !receiversMatchFilter(receivers, receiverFilter) {
-			continue
-		}
-
-		if !alertFilter(a, now) {
-			continue
-		}
-
-		alert := AlertToOpenAPIAlert(a, api.getAlertStatus(a.Fingerprint()), receivers)
-
-		res = append(res, alert)
-	}
-	api.mtx.RUnlock()
-
+	alerts, err := api.getAlerts(ctx, receiverFilter, alertFilter)
 	if err != nil {
 		level.Error(logger).Log("msg", "Failed to get alerts", "err", err)
 		return alert_ops.NewGetAlertsInternalServerError().WithPayload(err.Error())
 	}
-	sort.Slice(res, func(i, j int) bool {
-		return *res[i].Fingerprint < *res[j].Fingerprint
-	})
 
-	return alert_ops.NewGetAlertsOK().WithPayload(res)
+	callbackRes, err := api.apiCallback.V2GetAlertsCallback(alerts)
+	if err != nil {
+		level.Error(logger).Log("msg", "Failed to call api callback", "err", err)
+		return alert_ops.NewGetAlertsInternalServerError().WithPayload(err.Error())
+	}
+
+	return alert_ops.NewGetAlertsOK().WithPayload(callbackRes)
+}
+
+func (api *API) getAlertInfosHandler(params alertinfo_ops.GetAlertInfosParams) middleware.Responder {
+	var (
+		alerts         open_api_models.GettableAlerts
+		receiverFilter *regexp.Regexp
+		ctx            = params.HTTPRequest.Context()
+
+		logger = api.requestLogger(params.HTTPRequest)
+	)
+
+	matchers, err := parseFilter(params.Filter)
+	if err != nil {
+		level.Debug(logger).Log("msg", "Failed to parse matchers", "err", err)
+		return alertinfo_ops.NewGetAlertInfosBadRequest().WithPayload(err.Error())
+	}
+
+	if params.Receiver != nil {
+		receiverFilter, err = regexp.Compile("^(?:" + *params.Receiver + ")$")
+		if err != nil {
+			level.Debug(logger).Log("msg", "Failed to compile receiver regex", "err", err)
+			return alertinfo_ops.
+				NewGetAlertInfosBadRequest().
+				WithPayload(
+					fmt.Sprintf("failed to parse receiver param: %v", err.Error()),
+				)
+		}
+	}
+
+	if err = validateMaxResult(params.MaxResults); err != nil {
+		level.Error(logger).Log("msg", "Failed to parse MaxResults parameter", "err", err)
+		return alertinfo_ops.
+			NewGetAlertInfosBadRequest().
+			WithPayload(
+				fmt.Sprintf("failed to parse MaxResults param: %v", *params.MaxResults),
+			)
+	}
+
+	if err = validateAlertInfoNextToken(params.NextToken); err != nil {
+		level.Error(logger).Log("msg", "Failed to parse NextToken parameter", "err", err)
+		return alertinfo_ops.
+			NewGetAlertInfosBadRequest().
+			WithPayload(
+				fmt.Sprintf("failed to parse NextToken param: %v", *params.NextToken),
+			)
+	}
+
+	alertFilter := api.alertFilter(matchers, *params.Silenced, *params.Inhibited, *params.Active)
+	groupIdsFilter := api.groupIDFilter(params.GroupID)
+	if len(params.GroupID) > 0 {
+		alerts, err = api.getAlertsFromAlertGroup(ctx, receiverFilter, alertFilter, groupIdsFilter)
+	} else {
+		alerts, err = api.getAlerts(ctx, receiverFilter, alertFilter)
+	}
+	if err != nil {
+		level.Error(logger).Log("msg", "Failed to get alerts", "err", err)
+		return alertinfo_ops.NewGetAlertInfosInternalServerError().WithPayload(err.Error())
+	}
+
+	returnAlertInfos, nextItem := AlertInfosTruncate(alerts, params.MaxResults, params.NextToken)
+
+	response := &open_api_models.GettableAlertInfos{
+		Alerts:    returnAlertInfos,
+		NextToken: nextItem,
+	}
+
+	return alertinfo_ops.NewGetAlertInfosOK().WithPayload(response)
 }
 
 func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.Responder {
@@ -350,18 +406,29 @@ func (api *API) postAlertsHandler(params alert_ops.PostAlertsParams) middleware.
 		if err := a.Validate(); err != nil {
 			validationErrs.Add(err)
 			api.m.Invalid().Inc()
+			if api.alertLCObserver != nil {
+				m := alertobserver.AlertEventMeta{"msg": err.Error()}
+				api.alertLCObserver.Observe(alertobserver.EventAlertRejected, []*types.Alert{a}, m)
+			}
 			continue
 		}
 		validAlerts = append(validAlerts, a)
 	}
 	if err := api.alerts.Put(validAlerts...); err != nil {
 		level.Error(logger).Log("msg", "Failed to create alerts", "err", err)
+		if api.alertLCObserver != nil {
+			m := alertobserver.AlertEventMeta{"msg": err.Error()}
+			api.alertLCObserver.Observe(alertobserver.EventAlertRejected, validAlerts, m)
+		}
 		return alert_ops.NewPostAlertsInternalServerError().WithPayload(err.Error())
 	}
 
 	if validationErrs.Len() > 0 {
 		level.Error(logger).Log("msg", "Failed to validate alerts", "err", validationErrs.Error())
 		return alert_ops.NewPostAlertsBadRequest().WithPayload(validationErrs.Error())
+	}
+	if api.alertLCObserver != nil {
+		api.alertLCObserver.Observe(alertobserver.EventAlertReceived, validAlerts, alertobserver.AlertEventMeta{})
 	}
 
 	return alert_ops.NewPostAlertsOK()
@@ -389,18 +456,10 @@ func (api *API) getAlertGroupsHandler(params alertgroup_ops.GetAlertGroupsParams
 		}
 	}
 
-	rf := func(receiverFilter *regexp.Regexp) func(r *dispatch.Route) bool {
-		return func(r *dispatch.Route) bool {
-			receiver := r.RouteOpts.Receiver
-			if receiverFilter != nil && !receiverFilter.MatchString(receiver) {
-				return false
-			}
-			return true
-		}
-	}(receiverFilter)
-
+	rf := api.routeFilter(receiverFilter)
 	af := api.alertFilter(matchers, *params.Silenced, *params.Inhibited, *params.Active)
-	alertGroups, allReceivers := api.alertGroups(rf, af)
+	gf := api.groupIDFilter([]string{})
+	alertGroups, allReceivers := api.alertGroups(rf, af, gf)
 
 	res := make(open_api_models.AlertGroups, 0, len(alertGroups))
 
@@ -421,7 +480,111 @@ func (api *API) getAlertGroupsHandler(params alertgroup_ops.GetAlertGroupsParams
 		res = append(res, ag)
 	}
 
-	return alertgroup_ops.NewGetAlertGroupsOK().WithPayload(res)
+	callbackRes, err := api.apiCallback.V2GetAlertGroupsCallback(res)
+	if err != nil {
+		level.Error(logger).Log("msg", "Failed to call api callback", "err", err)
+		return alertgroup_ops.NewGetAlertGroupsInternalServerError().WithPayload(err.Error())
+	}
+
+	return alertgroup_ops.NewGetAlertGroupsOK().WithPayload(callbackRes)
+}
+
+func (api *API) getAlertGroupInfoListHandler(params alertgroupinfolist_ops.GetAlertGroupInfoListParams) middleware.Responder {
+	logger := api.requestLogger(params.HTTPRequest)
+
+	var receiverFilter *regexp.Regexp
+	var err error
+	if params.Receiver != nil {
+		receiverFilter, err = regexp.Compile("^(?:" + *params.Receiver + ")$")
+		if err != nil {
+			level.Error(logger).Log("msg", "Failed to compile receiver regex", "err", err)
+			return alertgroupinfolist_ops.
+				NewGetAlertGroupInfoListBadRequest().
+				WithPayload(
+					fmt.Sprintf("failed to parse receiver param: %v", err.Error()),
+				)
+		}
+	}
+
+	rf := func(receiverFilter *regexp.Regexp) func(r *dispatch.Route) bool {
+		return func(r *dispatch.Route) bool {
+			receiver := r.RouteOpts.Receiver
+			if receiverFilter != nil && !receiverFilter.MatchString(receiver) {
+				return false
+			}
+			return true
+		}
+	}(receiverFilter)
+
+	if err = validateNextToken(params.NextToken); err != nil {
+		level.Error(logger).Log("msg", "Failed to parse NextToken parameter", "err", err)
+		return alertgroupinfolist_ops.
+			NewGetAlertGroupInfoListBadRequest().
+			WithPayload(
+				fmt.Sprintf("failed to parse NextToken param: %v", *params.NextToken),
+			)
+	}
+
+	if err = validateMaxResult(params.MaxResults); err != nil {
+		level.Error(logger).Log("msg", "Failed to parse MaxResults parameter", "err", err)
+		return alertgroupinfolist_ops.
+			NewGetAlertGroupInfoListBadRequest().
+			WithPayload(
+				fmt.Sprintf("failed to parse MaxResults param: %v", *params.MaxResults),
+			)
+	}
+
+	ags := api.alertGroupInfos(rf)
+	alertGroupInfos := make([]*open_api_models.AlertGroupInfo, 0, len(ags))
+	for _, alertGroup := range ags {
+
+		// Skip the aggregation group if the next token is set and hasn't arrived the nextToken item yet.
+		if params.NextToken != nil && *params.NextToken >= alertGroup.ID {
+			continue
+		}
+
+		ag := &open_api_models.AlertGroupInfo{
+			Receiver: &open_api_models.Receiver{Name: &alertGroup.Receiver},
+			Labels:   ModelLabelSetToAPILabelSet(alertGroup.Labels),
+			ID:       &alertGroup.ID,
+		}
+		alertGroupInfos = append(alertGroupInfos, ag)
+	}
+
+	returnAlertGroupInfos, nextItem := AlertGroupInfoListTruncate(alertGroupInfos, params.MaxResults)
+
+	response := &open_api_models.AlertGroupInfoList{
+		AlertGroupInfoList: returnAlertGroupInfos,
+		NextToken:          nextItem,
+	}
+
+	return alertgroupinfolist_ops.NewGetAlertGroupInfoListOK().WithPayload(response)
+}
+
+func (api *API) groupIDFilter(groupIDsFilter []string) func(groupId string) bool {
+	return func(groupId string) bool {
+		if len(groupIDsFilter) <= 0 {
+			return true
+		}
+		for _, groupIDFilter := range groupIDsFilter {
+			if groupIDFilter == groupId {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func (api *API) routeFilter(receiverFilter *regexp.Regexp) func(r *dispatch.Route) bool {
+	return func(receiverFilter *regexp.Regexp) func(r *dispatch.Route) bool {
+		return func(r *dispatch.Route) bool {
+			receiver := r.RouteOpts.Receiver
+			if receiverFilter != nil && !receiverFilter.MatchString(receiver) {
+				return false
+			}
+			return true
+		}
+	}(receiverFilter)
 }
 
 func (api *API) alertFilter(matchers []*labels.Matcher, silenced, inhibited, active bool) func(a *types.Alert, now time.Time) bool {
@@ -720,4 +883,105 @@ func getSwaggerSpec() (*loads.Document, *analysis.Spec, error) {
 	swaggerSpecCache = swaggerSpec
 	swaggerSpecAnalysisCache = analysis.New(swaggerSpec.Spec())
 	return swaggerSpec, swaggerSpecAnalysisCache, nil
+}
+
+func (api *API) getAlertsFromAlertGroup(ctx context.Context, receiverFilter *regexp.Regexp, alertFilter func(a *types.Alert, now time.Time) bool, groupIdsFilter func(groupId string) bool) (open_api_models.GettableAlerts, error) {
+	res := open_api_models.GettableAlerts{}
+	routeFilter := api.routeFilter(receiverFilter)
+	alertGroups, allReceivers := api.alertGroups(routeFilter, alertFilter, groupIdsFilter)
+	for _, alertGroup := range alertGroups {
+		for _, alert := range alertGroup.Alerts {
+			if err := ctx.Err(); err != nil {
+				break
+			}
+			fp := alert.Fingerprint()
+			receivers := allReceivers[fp]
+			status := api.getAlertStatus(fp)
+			apiAlert := AlertToOpenAPIAlert(alert, status, receivers)
+			res = append(res, apiAlert)
+		}
+	}
+
+	sort.Slice(res, func(i, j int) bool {
+		return *res[i].Fingerprint < *res[j].Fingerprint
+	})
+
+	return res, nil
+}
+
+func (api *API) getAlerts(ctx context.Context, receiverFilter *regexp.Regexp, alertFilter func(a *types.Alert, now time.Time) bool) (open_api_models.GettableAlerts, error) {
+	var err error
+	res := open_api_models.GettableAlerts{}
+
+	alerts := api.alerts.GetPending()
+	defer alerts.Close()
+
+	now := time.Now()
+
+	api.mtx.RLock()
+	for a := range alerts.Next() {
+		if err = alerts.Err(); err != nil {
+			break
+		}
+		if err = ctx.Err(); err != nil {
+			break
+		}
+
+		routes := api.route.Match(a.Labels)
+		receivers := make([]string, 0, len(routes))
+		for _, r := range routes {
+			receivers = append(receivers, r.RouteOpts.Receiver)
+		}
+
+		if receiverFilter != nil && !receiversMatchFilter(receivers, receiverFilter) {
+			continue
+		}
+
+		if !alertFilter(a, now) {
+			continue
+		}
+
+		alert := AlertToOpenAPIAlert(a, api.getAlertStatus(a.Fingerprint()), receivers)
+
+		res = append(res, alert)
+	}
+	api.mtx.RUnlock()
+
+	if err != nil {
+		return res, err
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return *res[i].Fingerprint < *res[j].Fingerprint
+	})
+
+	return res, nil
+}
+
+func validateMaxResult(maxItem *int64) error {
+	if maxItem != nil {
+		if *maxItem < 0 {
+			return errors.New("the maxItem need to be larger than or equal to 0")
+		}
+	}
+	return nil
+}
+
+func validateAlertInfoNextToken(nextToken *string) error {
+	if nextToken != nil {
+		_, err := prometheus_model.ParseFingerprint(*nextToken)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateNextToken(nextToken *string) error {
+	if nextToken != nil {
+		match, _ := regexp.MatchString("^[a-fA-F0-9]{40}$", *nextToken)
+		if !match {
+			return fmt.Errorf("invalid nextToken: %s", *nextToken)
+		}
+	}
+	return nil
 }

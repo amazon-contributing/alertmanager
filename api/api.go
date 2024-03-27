@@ -20,11 +20,14 @@ import (
 	"runtime"
 	"time"
 
+	"github.com/prometheus/alertmanager/util/callback"
+
 	"github.com/go-kit/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/route"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	apiv1 "github.com/prometheus/alertmanager/api/v1"
 	apiv2 "github.com/prometheus/alertmanager/api/v2"
 	"github.com/prometheus/alertmanager/cluster"
@@ -73,7 +76,15 @@ type Options struct {
 	// GroupFunc returns a list of alert groups. The alerts are grouped
 	// according to the current active configuration. Alerts returned are
 	// filtered by the arguments provided to the function.
-	GroupFunc func(func(*dispatch.Route) bool, func(*types.Alert, time.Time) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string)
+	GroupFunc func(func(*dispatch.Route) bool, func(*types.Alert, time.Time) bool, func(string) bool) (dispatch.AlertGroups, map[model.Fingerprint][]string)
+	// GroupInfoFunc returns a list of alert groups information. The alerts are grouped
+	// according to the current active configuration. This function will not return the alerts inside each group.
+	GroupInfoFunc func(func(*dispatch.Route) bool) dispatch.AlertGroupInfos
+	// APICallback define the callback function that each api call will perform before returned.
+	APICallback callback.Callback
+	// AlertLCObserver is used to add hooks to the different alert life cycle events.
+	// If nil then no observer methods will be invoked in the life cycle events.
+	AlertLCObserver alertobserver.LifeCycleObserver
 }
 
 func (o Options) validate() error {
@@ -117,16 +128,20 @@ func New(opts Options) (*API, error) {
 		opts.Peer,
 		log.With(l, "version", "v1"),
 		opts.Registry,
+		opts.AlertLCObserver,
 	)
 
 	v2, err := apiv2.NewAPI(
 		opts.Alerts,
 		opts.GroupFunc,
+		opts.GroupInfoFunc,
 		opts.StatusFunc,
 		opts.Silences,
+		opts.APICallback,
 		opts.Peer,
 		log.With(l, "version", "v2"),
 		opts.Registry,
+		opts.AlertLCObserver,
 	)
 	if err != nil {
 		return nil, err

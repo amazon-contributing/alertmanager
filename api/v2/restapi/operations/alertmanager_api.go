@@ -35,6 +35,8 @@ import (
 
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alert"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroup"
+	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alertgroupinfolist"
+	"github.com/prometheus/alertmanager/api/v2/restapi/operations/alertinfo"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/general"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/receiver"
 	"github.com/prometheus/alertmanager/api/v2/restapi/operations/silence"
@@ -65,8 +67,14 @@ func NewAlertmanagerAPI(spec *loads.Document) *AlertmanagerAPI {
 		SilenceDeleteSilenceHandler: silence.DeleteSilenceHandlerFunc(func(params silence.DeleteSilenceParams) middleware.Responder {
 			return middleware.NotImplemented("operation silence.DeleteSilence has not yet been implemented")
 		}),
+		AlertgroupinfolistGetAlertGroupInfoListHandler: alertgroupinfolist.GetAlertGroupInfoListHandlerFunc(func(params alertgroupinfolist.GetAlertGroupInfoListParams) middleware.Responder {
+			return middleware.NotImplemented("operation alertgroupinfolist.GetAlertGroupInfoList has not yet been implemented")
+		}),
 		AlertgroupGetAlertGroupsHandler: alertgroup.GetAlertGroupsHandlerFunc(func(params alertgroup.GetAlertGroupsParams) middleware.Responder {
 			return middleware.NotImplemented("operation alertgroup.GetAlertGroups has not yet been implemented")
+		}),
+		AlertinfoGetAlertInfosHandler: alertinfo.GetAlertInfosHandlerFunc(func(params alertinfo.GetAlertInfosParams) middleware.Responder {
+			return middleware.NotImplemented("operation alertinfo.GetAlertInfos has not yet been implemented")
 		}),
 		AlertGetAlertsHandler: alert.GetAlertsHandlerFunc(func(params alert.GetAlertsParams) middleware.Responder {
 			return middleware.NotImplemented("operation alert.GetAlerts has not yet been implemented")
@@ -127,8 +135,12 @@ type AlertmanagerAPI struct {
 
 	// SilenceDeleteSilenceHandler sets the operation handler for the delete silence operation
 	SilenceDeleteSilenceHandler silence.DeleteSilenceHandler
+	// AlertgroupinfolistGetAlertGroupInfoListHandler sets the operation handler for the get alert group info list operation
+	AlertgroupinfolistGetAlertGroupInfoListHandler alertgroupinfolist.GetAlertGroupInfoListHandler
 	// AlertgroupGetAlertGroupsHandler sets the operation handler for the get alert groups operation
 	AlertgroupGetAlertGroupsHandler alertgroup.GetAlertGroupsHandler
+	// AlertinfoGetAlertInfosHandler sets the operation handler for the get alert infos operation
+	AlertinfoGetAlertInfosHandler alertinfo.GetAlertInfosHandler
 	// AlertGetAlertsHandler sets the operation handler for the get alerts operation
 	AlertGetAlertsHandler alert.GetAlertsHandler
 	// ReceiverGetReceiversHandler sets the operation handler for the get receivers operation
@@ -223,8 +235,14 @@ func (o *AlertmanagerAPI) Validate() error {
 	if o.SilenceDeleteSilenceHandler == nil {
 		unregistered = append(unregistered, "silence.DeleteSilenceHandler")
 	}
+	if o.AlertgroupinfolistGetAlertGroupInfoListHandler == nil {
+		unregistered = append(unregistered, "alertgroupinfolist.GetAlertGroupInfoListHandler")
+	}
 	if o.AlertgroupGetAlertGroupsHandler == nil {
 		unregistered = append(unregistered, "alertgroup.GetAlertGroupsHandler")
+	}
+	if o.AlertinfoGetAlertInfosHandler == nil {
+		unregistered = append(unregistered, "alertinfo.GetAlertInfosHandler")
 	}
 	if o.AlertGetAlertsHandler == nil {
 		unregistered = append(unregistered, "alert.GetAlertsHandler")
@@ -342,7 +360,15 @@ func (o *AlertmanagerAPI) initHandlerCache() {
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}
+	o.handlers["GET"]["/alertgroups"] = alertgroupinfolist.NewGetAlertGroupInfoList(o.context, o.AlertgroupinfolistGetAlertGroupInfoListHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
 	o.handlers["GET"]["/alerts/groups"] = alertgroup.NewGetAlertGroups(o.context, o.AlertgroupGetAlertGroupsHandler)
+	if o.handlers["GET"] == nil {
+		o.handlers["GET"] = make(map[string]http.Handler)
+	}
+	o.handlers["GET"]["/alertinfos"] = alertinfo.NewGetAlertInfos(o.context, o.AlertinfoGetAlertInfosHandler)
 	if o.handlers["GET"] == nil {
 		o.handlers["GET"] = make(map[string]http.Handler)
 	}

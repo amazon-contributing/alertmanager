@@ -15,6 +15,7 @@ package dispatch
 
 import (
 	"context"
+	"crypto/sha1"
 	"fmt"
 	"sort"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 
+	"github.com/prometheus/alertmanager/alertobserver"
 	"github.com/prometheus/alertmanager/notify"
 	"github.com/prometheus/alertmanager/provider"
 	"github.com/prometheus/alertmanager/store"
@@ -90,7 +92,8 @@ type Dispatcher struct {
 	ctx    context.Context
 	cancel func()
 
-	logger log.Logger
+	logger          log.Logger
+	alertLCObserver alertobserver.LifeCycleObserver
 }
 
 // Limits describes limits used by Dispatcher.
@@ -111,19 +114,21 @@ func NewDispatcher(
 	lim Limits,
 	l log.Logger,
 	m *DispatcherMetrics,
+	o alertobserver.LifeCycleObserver,
 ) *Dispatcher {
 	if lim == nil {
 		lim = nilLimits{}
 	}
 
 	disp := &Dispatcher{
-		alerts:  ap,
-		stage:   s,
-		route:   r,
-		timeout: to,
-		logger:  log.With(l, "component", "dispatcher"),
-		metrics: m,
-		limits:  lim,
+		alerts:          ap,
+		stage:           s,
+		route:           r,
+		timeout:         to,
+		logger:          log.With(l, "component", "dispatcher"),
+		metrics:         m,
+		limits:          lim,
+		alertLCObserver: o,
 	}
 	return disp
 }
@@ -215,7 +220,7 @@ func (ag AlertGroups) Less(i, j int) bool {
 func (ag AlertGroups) Len() int { return len(ag) }
 
 // Groups returns a slice of AlertGroups from the dispatcher's internal state.
-func (d *Dispatcher) Groups(routeFilter func(*Route) bool, alertFilter func(*types.Alert, time.Time) bool) (AlertGroups, map[model.Fingerprint][]string) {
+func (d *Dispatcher) Groups(routeFilter func(*Route) bool, alertFilter func(*types.Alert, time.Time) bool, groupIDFilter func(groupId string) bool) (AlertGroups, map[model.Fingerprint][]string) {
 	groups := AlertGroups{}
 
 	d.mtx.RLock()
@@ -233,6 +238,9 @@ func (d *Dispatcher) Groups(routeFilter func(*Route) bool, alertFilter func(*typ
 		}
 
 		for _, ag := range ags {
+			if !groupIDFilter(ag.GroupID()) {
+				continue
+			}
 			receiver := route.RouteOpts.Receiver
 			alertGroup := &AlertGroup{
 				Labels:   ag.labels,
@@ -278,6 +286,48 @@ func (d *Dispatcher) Groups(routeFilter func(*Route) bool, alertFilter func(*typ
 	return groups, receivers
 }
 
+// AlertGroupInfo represents the aggrGroup information.
+type AlertGroupInfo struct {
+	Labels   model.LabelSet
+	Receiver string
+	ID       string
+}
+
+type AlertGroupInfos []*AlertGroupInfo
+
+func (ag AlertGroupInfos) Swap(i, j int) { ag[i], ag[j] = ag[j], ag[i] }
+func (ag AlertGroupInfos) Less(i, j int) bool {
+	return ag[i].ID < ag[j].ID
+}
+func (ag AlertGroupInfos) Len() int { return len(ag) }
+
+func (d *Dispatcher) GroupInfos(routeFilter func(*Route) bool) AlertGroupInfos {
+	groups := AlertGroupInfos{}
+
+	d.mtx.RLock()
+	defer d.mtx.RUnlock()
+
+	for route, ags := range d.aggrGroupsPerRoute {
+		if !routeFilter(route) {
+			continue
+		}
+
+		for _, ag := range ags {
+			receiver := route.RouteOpts.Receiver
+			alertGroup := &AlertGroupInfo{
+				Labels:   ag.labels,
+				Receiver: receiver,
+				ID:       ag.GroupID(),
+			}
+
+			groups = append(groups, alertGroup)
+		}
+	}
+	sort.Sort(groups)
+
+	return groups
+}
+
 // Stop the dispatcher.
 func (d *Dispatcher) Stop() {
 	if d == nil {
@@ -319,13 +369,25 @@ func (d *Dispatcher) processAlert(alert *types.Alert, route *Route) {
 	ag, ok := routeGroups[fp]
 	if ok {
 		ag.insert(alert)
+		if d.alertLCObserver != nil {
+			m := alertobserver.AlertEventMeta{
+				"groupKey": ag.GroupKey(),
+				"routeId":  ag.routeID,
+				"groupId":  ag.GroupID(),
+			}
+			d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+		}
 		return
 	}
 
 	// If the group does not exist, create it. But check the limit first.
 	if limit := d.limits.MaxNumberOfAggregationGroups(); limit > 0 && d.aggrGroupsNum >= limit {
 		d.metrics.aggrGroupLimitReached.Inc()
-		level.Error(d.logger).Log("msg", "Too many aggregation groups, cannot create new group for alert", "groups", d.aggrGroupsNum, "limit", limit, "alert", alert.Name())
+		errMsg := "Too many aggregation groups, cannot create new group for alert"
+		level.Error(d.logger).Log("msg", errMsg, "groups", d.aggrGroupsNum, "limit", limit, "alert", alert.Name())
+		if d.alertLCObserver != nil {
+			d.alertLCObserver.Observe(alertobserver.EventAlertFailedAddToAggrGroup, []*types.Alert{alert}, alertobserver.AlertEventMeta{"msg": errMsg})
+		}
 		return
 	}
 
@@ -333,6 +395,14 @@ func (d *Dispatcher) processAlert(alert *types.Alert, route *Route) {
 	routeGroups[fp] = ag
 	d.aggrGroupsNum++
 	d.metrics.aggrGroups.Inc()
+	if d.alertLCObserver != nil {
+		m := alertobserver.AlertEventMeta{
+			"groupKey": ag.GroupKey(),
+			"routeId":  ag.routeID,
+			"groupId":  ag.GroupID(),
+		}
+		d.alertLCObserver.Observe(alertobserver.EventAlertAddedToAggrGroup, []*types.Alert{alert}, m)
+	}
 
 	// Insert the 1st alert in the group before starting the group's run()
 	// function, to make sure that when the run() will be executed the 1st
@@ -374,6 +444,7 @@ type aggrGroup struct {
 	opts     *RouteOpts
 	logger   log.Logger
 	routeKey string
+	routeID  string
 
 	alerts  *store.Alerts
 	ctx     context.Context
@@ -394,6 +465,7 @@ func newAggrGroup(ctx context.Context, labels model.LabelSet, r *Route, to func(
 	ag := &aggrGroup{
 		labels:   labels,
 		routeKey: r.Key(),
+		routeID:  r.ID(),
 		opts:     &r.RouteOpts,
 		timeout:  to,
 		alerts:   store.NewAlerts(),
@@ -412,6 +484,12 @@ func newAggrGroup(ctx context.Context, labels model.LabelSet, r *Route, to func(
 
 func (ag *aggrGroup) fingerprint() model.Fingerprint {
 	return ag.labels.Fingerprint()
+}
+
+func (ag *aggrGroup) GroupID() string {
+	h := sha1.New()
+	h.Write([]byte(fmt.Sprintf("%s:%s", ag.routeID, ag.labels)))
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
 func (ag *aggrGroup) GroupKey() string {
@@ -441,6 +519,7 @@ func (ag *aggrGroup) run(nf notifyFunc) {
 
 			// Populate context with information needed along the pipeline.
 			ctx = notify.WithGroupKey(ctx, ag.GroupKey())
+			ctx = notify.WithGroupId(ctx, ag.GroupID())
 			ctx = notify.WithGroupLabels(ctx, ag.labels)
 			ctx = notify.WithReceiverName(ctx, ag.opts.Receiver)
 			ctx = notify.WithRepeatInterval(ctx, ag.opts.RepeatInterval)
