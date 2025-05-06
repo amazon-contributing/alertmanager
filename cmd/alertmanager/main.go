@@ -17,6 +17,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/prometheus/alertmanager/secrets"
+	"github.com/prometheus/alertmanager/secrets/providers"
 	"log/slog"
 	"net"
 	"net/http"
@@ -158,10 +160,10 @@ func run() int {
 		httpTimeout    = kingpin.Flag("web.timeout", "Timeout for HTTP requests. If negative or zero, no timeout is set.").Default("0").Duration()
 
 		memlimitRatio = kingpin.Flag("auto-gomemlimit.ratio", "The ratio of reserved GOMEMLIMIT memory to the detected maximum container or system memory. The value must be greater than 0 and less than or equal to 1.").
-				Default("0.9").Float64()
+			Default("0.9").Float64()
 
 		clusterBindAddr = kingpin.Flag("cluster.listen-address", "Listen address for cluster. Set to empty string to disable HA mode.").
-				Default(defaultClusterAddr).String()
+			Default(defaultClusterAddr).String()
 		clusterAdvertiseAddr   = kingpin.Flag("cluster.advertise-address", "Explicit address to advertise in cluster.").String()
 		peers                  = kingpin.Flag("cluster.peer", "Initial peers (may be repeated).").Strings()
 		peerTimeout            = kingpin.Flag("cluster.peer-timeout", "Time to wait between peers to send notifications.").Default("15s").Duration()
@@ -402,8 +404,9 @@ func run() int {
 	}
 
 	var (
-		inhibitor *inhibit.Inhibitor
-		tmpl      *template.Template
+		inhibitor               *inhibit.Inhibitor
+		tmpl                    *template.Template
+		secretsProviderRegistry *secrets.SecretsProviderRegistry
 	)
 
 	dispMetrics := dispatch.NewDispatcherMetrics(false, prometheus.DefaultRegisterer)
@@ -414,6 +417,9 @@ func run() int {
 		prometheus.DefaultRegisterer,
 		configLogger,
 	)
+	defer func() {
+		secretsProviderRegistry.Stop()
+	}()
 	configCoordinator.Subscribe(func(conf *config.Config) error {
 		tmpl, err = template.FromGlobs(conf.Templates)
 		if err != nil {
@@ -428,6 +434,10 @@ func run() int {
 			activeReceivers[r.RouteOpts.Receiver] = struct{}{}
 		})
 
+		spRegistry := secrets.NewSecretsProviderRegistry(logger, prometheus.NewRegistry())
+		// currently only one secrets providers is supported
+		spRegistry.Register(providers.AWSSecretsManagerSecretProviderDiscoveryConfig{})
+		spRegistry.Init()
 		// Build the map of receiver to integrations.
 		receivers := make(map[string][]notify.Integration, len(activeReceivers))
 		var integrationsNum int
@@ -437,7 +447,7 @@ func run() int {
 				configLogger.Info("skipping creation of receiver not referenced by any route", "receiver", rcv.Name)
 				continue
 			}
-			integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, logger)
+			integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, logger, spRegistry)
 			if err != nil {
 				return err
 			}
@@ -460,10 +470,13 @@ func run() int {
 
 		inhibitor.Stop()
 		disp.Stop()
+		if secretsProviderRegistry != nil {
+			secretsProviderRegistry.Stop()
+		}
 
 		inhibitor = inhibit.NewInhibitor(alerts, conf.InhibitRules, marker, logger)
 		silencer := silence.NewSilencer(silences, marker, logger)
-
+		secretsProviderRegistry = spRegistry
 		// An interface value that holds a nil concrete value is non-nil.
 		// Therefore we explicly pass an empty interface, to detect if the
 		// cluster is not enabled in notify.
