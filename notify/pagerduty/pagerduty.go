@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/prometheus/alertmanager/secrets"
 	"io"
 	"log/slog"
 	"net/http"
@@ -45,27 +46,30 @@ const (
 
 // Notifier implements a Notifier for PagerDuty notifications.
 type Notifier struct {
-	conf    *config.PagerdutyConfig
-	tmpl    *template.Template
-	logger  *slog.Logger
-	apiV1   string // for tests.
-	client  *http.Client
-	retrier *notify.Retrier
+	conf           *config.PagerdutyConfig
+	tmpl           *template.Template
+	logger         *slog.Logger
+	apiV1          string // for tests.
+	client         *http.Client
+	retrier        *notify.Retrier
+	secretsFetcher secrets.SecretsFetcher
 }
 
 // New returns a new PagerDuty notifier.
-func New(c *config.PagerdutyConfig, t *template.Template, l *slog.Logger, httpOpts ...commoncfg.HTTPClientOption) (*Notifier, error) {
+func New(c *config.PagerdutyConfig, t *template.Template, l *slog.Logger, spRegistry *secrets.SecretsProviderRegistry, httpOpts ...commoncfg.HTTPClientOption) (*Notifier, error) {
 	client, err := commoncfg.NewClientFromConfig(*c.HTTPConfig, "pagerduty", httpOpts...)
 	if err != nil {
 		return nil, err
 	}
 	n := &Notifier{conf: c, tmpl: t, logger: l, client: client}
-	if c.ServiceKey != "" || c.ServiceKeyFile != "" {
+	if c.ServiceKey != nil || c.ServiceKeyFile != "" {
+		n.secretsFetcher, err = spRegistry.RegisterSecret(c.ServiceKey)
 		n.apiV1 = "https://events.pagerduty.com/generic/2010-04-15/create_event.json"
 		// Retrying can solve the issue on 403 (rate limiting) and 5xx response codes.
 		// https://v2.developer.pagerduty.com/docs/trigger-events
 		n.retrier = &notify.Retrier{RetryCodes: []int{http.StatusForbidden}, CustomDetailsFunc: errDetails}
 	} else {
+		n.secretsFetcher, err = spRegistry.RegisterSecret(c.RoutingKey)
 		// Retrying can solve the issue on 429 (rate limiting) and 5xx response codes.
 		// https://v2.developer.pagerduty.com/docs/events-api-v2#api-response-codes--retry-logic
 		n.retrier = &notify.Retrier{RetryCodes: []int{http.StatusTooManyRequests}, CustomDetailsFunc: errDetails}
@@ -143,6 +147,22 @@ func (n *Notifier) encodeMessage(msg *pagerDutyMessage) (bytes.Buffer, error) {
 	return buf, nil
 }
 
+func (n *Notifier) getSecret(ctx context.Context) string {
+	var secret *secrets.GenericSecret
+	if n.conf.ServiceKey != nil {
+		secret = n.conf.ServiceKey
+	} else {
+		secret = n.conf.RoutingKey
+	}
+
+	if sec, err := n.secretsFetcher.FetchSecret(ctx, secret); err != nil {
+		n.logger.Error("unable to fetch secret", err)
+		return ""
+	} else {
+		return sec
+	}
+}
+
 func (n *Notifier) notifyV1(
 	ctx context.Context,
 	eventType string,
@@ -159,7 +179,8 @@ func (n *Notifier) notifyV1(
 		n.logger.Warn("Truncated description", "key", key, "max_runes", maxV1DescriptionLenRunes)
 	}
 
-	serviceKey := string(n.conf.ServiceKey)
+	//serviceKey := string(n.conf.ServiceKey)
+	serviceKey := n.getSecret(ctx)
 	if serviceKey == "" {
 		content, fileErr := os.ReadFile(n.conf.ServiceKeyFile)
 		if fileErr != nil {
@@ -224,7 +245,8 @@ func (n *Notifier) notifyV2(
 		n.logger.Warn("Truncated summary", "key", key, "max_runes", maxV2SummaryLenRunes)
 	}
 
-	routingKey := string(n.conf.RoutingKey)
+	//routingKey := string(n.conf.RoutingKey)
+	routingKey := n.getSecret(ctx)
 	if routingKey == "" {
 		content, fileErr := os.ReadFile(n.conf.RoutingKeyFile)
 		if fileErr != nil {
