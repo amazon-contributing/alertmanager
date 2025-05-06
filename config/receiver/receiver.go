@@ -14,6 +14,7 @@
 package receiver
 
 import (
+	"github.com/prometheus/alertmanager/secrets"
 	"log/slog"
 
 	commoncfg "github.com/prometheus/common/config"
@@ -43,7 +44,7 @@ import (
 
 // BuildReceiverIntegrations builds a list of integration notifiers off of a
 // receiver config.
-func BuildReceiverIntegrations(nc config.Receiver, tmpl *template.Template, logger *slog.Logger, httpOpts ...commoncfg.HTTPClientOption) ([]notify.Integration, error) {
+func BuildReceiverIntegrations(nc config.Receiver, tmpl *template.Template, logger *slog.Logger, spRegistry *secrets.SecretsProviderRegistry, httpOpts ...commoncfg.HTTPClientOption) ([]notify.Integration, error) {
 	if logger == nil {
 		logger = promslog.NewNopLogger()
 	}
@@ -68,7 +69,9 @@ func BuildReceiverIntegrations(nc config.Receiver, tmpl *template.Template, logg
 		add("email", i, c, func(l *slog.Logger) (notify.Notifier, error) { return email.New(c, tmpl, l), nil })
 	}
 	for i, c := range nc.PagerdutyConfigs {
-		add("pagerduty", i, c, func(l *slog.Logger) (notify.Notifier, error) { return pagerduty.New(c, tmpl, l, httpOpts...) })
+		add("pagerduty", i, c, func(l *slog.Logger) (notify.Notifier, error) {
+			return pagerduty.New(c, tmpl, l, spRegistry, httpOpts...)
+		})
 	}
 	for i, c := range nc.OpsGenieConfigs {
 		add("opsgenie", i, c, func(l *slog.Logger) (notify.Notifier, error) { return opsgenie.New(c, tmpl, l, httpOpts...) })
