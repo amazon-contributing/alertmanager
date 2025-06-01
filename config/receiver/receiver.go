@@ -16,6 +16,8 @@ package receiver
 import (
 	"log/slog"
 
+	"github.com/prometheus/alertmanager/secrets"
+
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/promslog"
 
