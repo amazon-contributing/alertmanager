@@ -1,26 +1,40 @@
+// Copyright 2019 Prometheus Team
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package secrets
 
 import (
 	"context"
 	"errors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/config"
 	"log/slog"
 	"sync"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
-var (
-	AWS_SECRETS_MANAGER_PROVIDER = "aws_secrets_manager"
-)
+var AWSSecretsManagerProviderName = "aws_secrets_manager"
 
 type SecretsFetcher interface {
-	FetchSecret(ctx context.Context, secret *GenericSecret) (string, error)
+	FetchSecret(ctx context.Context, secret GenericSecret) (string, error)
+	RefreshCredentialsAsync()
 	Stop()
+	AwaitStop()
 }
 
 type SecretsProvider interface {
-	Register(secret *GenericSecret) SecretsFetcher
+	Register(secret GenericSecret) SecretsFetcher
 	Stop()
+	UpdateComplete()
 }
 
 type SecretsProviderRegistry struct {
@@ -43,11 +57,19 @@ func NewSecretsProviderRegistry(logger *slog.Logger, reg prometheus.Registerer) 
 	return registry
 }
 
-func (s *SecretsProviderRegistry) Register(config SecretProviderDiscoveryConfig) {
+func (s *SecretsProviderRegistry) Register(config SecretProviderDiscoveryConfig) error {
+	if config == nil {
+		return errors.New("nil config provided")
+	}
+	name := config.Name()
+	if name == "" {
+		return errors.New("empty provider name")
+	}
 	s.mtx.Lock()
 	defer s.mtx.Unlock()
-	s.logger.Info("registering secret providers", "name", config.Name())
+	s.logger.Info("registering secret provider", "name", config.Name())
 	s.configs[config.Name()] = config
+	return nil
 }
 
 func (s *SecretsProviderRegistry) Init() {
@@ -69,6 +91,15 @@ func (s *SecretsProviderRegistry) Init() {
 	}
 }
 
+func (s *SecretsProviderRegistry) UpdateComplete() {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+	for name, provider := range s.providers {
+		s.logger.Info("update complete invoked on provider", "name", name)
+		provider.UpdateComplete()
+	}
+}
+
 func (s *SecretsProviderRegistry) Stop() {
 	if s == nil {
 		return
@@ -84,17 +115,25 @@ func (s *SecretsProviderRegistry) Stop() {
 		s.logger.Info("stopping secrets providers", "name", name)
 		provider.Stop()
 	}
+	s.providers = nil
 	s.logger.Info("stopped secrets providers registry")
 }
 
-func (s *SecretsProviderRegistry) RegisterSecret(secret *GenericSecret) (SecretsFetcher, error) {
+func (s *SecretsProviderRegistry) RegisterSecret(secret GenericSecret) (SecretsFetcher, error) {
 	s.mtx.RLock()
 	defer s.mtx.RUnlock()
 
 	s.logger.Info("registering secret")
-	if secret.AWSSecretsManagerConfig != nil {
+	if !secret.AWSSecretsManagerConfig.IsZero() {
+		provider, exists := s.providers[AWSSecretsManagerProviderName]
+		if !exists {
+			return nil, errors.New("AWS secrets manager provider not initialized")
+		}
 		s.logger.Info("registering aws_secret_manager secret")
-		return s.providers[AWS_SECRETS_MANAGER_PROVIDER].Register(secret), nil
+		return provider.Register(secret), nil
+	}
+	if secret.Inline.Secret != "" {
+		return InlineSecretsFetcher{}, nil
 	}
 	return nil, errors.New("no secrets fetcher found for the given secret")
 }
@@ -112,7 +151,15 @@ type SecretProviderOptions struct {
 	// A registerer for the SecretProvider's metrics.
 	Registerer prometheus.Registerer
 
-	HTTPClientOptions []config.HTTPClientOption
-
 	Context context.Context
 }
+
+type InlineSecretsFetcher struct{}
+
+func (i InlineSecretsFetcher) FetchSecret(ctx context.Context, secret GenericSecret) (string, error) {
+	return secret.Inline.Secret, nil
+}
+
+func (i InlineSecretsFetcher) RefreshCredentialsAsync() {}
+func (i InlineSecretsFetcher) Stop()                    {}
+func (i InlineSecretsFetcher) AwaitStop()               {}

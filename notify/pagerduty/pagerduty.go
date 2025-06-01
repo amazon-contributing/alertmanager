@@ -19,12 +19,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/prometheus/alertmanager/secrets"
 	"io"
 	"log/slog"
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/prometheus/alertmanager/secrets"
 
 	"github.com/alecthomas/units"
 	commoncfg "github.com/prometheus/common/config"
@@ -62,14 +63,21 @@ func New(c *config.PagerdutyConfig, t *template.Template, l *slog.Logger, spRegi
 		return nil, err
 	}
 	n := &Notifier{conf: c, tmpl: t, logger: l, client: client}
-	if c.ServiceKey != nil || c.ServiceKeyFile != "" {
+
+	if !c.ServiceKey.IsZero() {
 		n.secretsFetcher, err = spRegistry.RegisterSecret(c.ServiceKey)
+	} else if !c.RoutingKey.IsZero() {
+		n.secretsFetcher, err = spRegistry.RegisterSecret(c.RoutingKey)
+	}
+	if err != nil {
+		l.Error("error registering secret", "err", err)
+	}
+	if !c.ServiceKey.IsZero() || c.ServiceKeyFile != "" {
 		n.apiV1 = "https://events.pagerduty.com/generic/2010-04-15/create_event.json"
 		// Retrying can solve the issue on 403 (rate limiting) and 5xx response codes.
 		// https://v2.developer.pagerduty.com/docs/trigger-events
 		n.retrier = &notify.Retrier{RetryCodes: []int{http.StatusForbidden}, CustomDetailsFunc: errDetails}
 	} else {
-		n.secretsFetcher, err = spRegistry.RegisterSecret(c.RoutingKey)
 		// Retrying can solve the issue on 429 (rate limiting) and 5xx response codes.
 		// https://v2.developer.pagerduty.com/docs/events-api-v2#api-response-codes--retry-logic
 		n.retrier = &notify.Retrier{RetryCodes: []int{http.StatusTooManyRequests}, CustomDetailsFunc: errDetails}
@@ -148,19 +156,22 @@ func (n *Notifier) encodeMessage(msg *pagerDutyMessage) (bytes.Buffer, error) {
 }
 
 func (n *Notifier) getSecret(ctx context.Context) string {
-	var secret *secrets.GenericSecret
-	if n.conf.ServiceKey != nil {
+	var secret secrets.GenericSecret
+	if !n.conf.ServiceKey.IsZero() {
 		secret = n.conf.ServiceKey
-	} else {
+	} else if !n.conf.RoutingKey.IsZero() {
 		secret = n.conf.RoutingKey
 	}
-
-	if sec, err := n.secretsFetcher.FetchSecret(ctx, secret); err != nil {
-		n.logger.Error("unable to fetch secret", err)
+	if secret.IsZero() || n.secretsFetcher == nil {
 		return ""
-	} else {
-		return sec
 	}
+
+	sec, err := n.secretsFetcher.FetchSecret(ctx, secret)
+	if err != nil {
+		n.logger.Error("unable to fetch secret", "error", err)
+		return ""
+	}
+	return sec
 }
 
 func (n *Notifier) notifyV1(
@@ -179,9 +190,8 @@ func (n *Notifier) notifyV1(
 		n.logger.Warn("Truncated description", "key", key, "max_runes", maxV1DescriptionLenRunes)
 	}
 
-	//serviceKey := string(n.conf.ServiceKey)
 	serviceKey := n.getSecret(ctx)
-	if serviceKey == "" {
+	if serviceKey == "" && n.conf.ServiceKeyFile != "" {
 		content, fileErr := os.ReadFile(n.conf.ServiceKeyFile)
 		if fileErr != nil {
 			return false, fmt.Errorf("failed to read service key from file: %w", fileErr)
@@ -220,6 +230,9 @@ func (n *Notifier) notifyV1(
 	if err != nil {
 		return true, fmt.Errorf("failed to post message to PagerDuty v1: %w", err)
 	}
+	if resp.StatusCode == 403 {
+		n.secretsFetcher.RefreshCredentialsAsync()
+	}
 	defer notify.Drain(resp)
 
 	return n.retrier.Check(resp.StatusCode, resp.Body)
@@ -245,9 +258,8 @@ func (n *Notifier) notifyV2(
 		n.logger.Warn("Truncated summary", "key", key, "max_runes", maxV2SummaryLenRunes)
 	}
 
-	//routingKey := string(n.conf.RoutingKey)
 	routingKey := n.getSecret(ctx)
-	if routingKey == "" {
+	if routingKey == "" && n.conf.RoutingKeyFile != "" {
 		content, fileErr := os.ReadFile(n.conf.RoutingKeyFile)
 		if fileErr != nil {
 			return false, fmt.Errorf("failed to read routing key from file: %w", fileErr)
@@ -317,6 +329,9 @@ func (n *Notifier) notifyV2(
 	}
 	defer notify.Drain(resp)
 
+	if resp.StatusCode == 403 {
+		n.secretsFetcher.RefreshCredentialsAsync()
+	}
 	retry, err := n.retrier.Check(resp.StatusCode, resp.Body)
 	if err != nil {
 		return retry, notify.NewErrorWithReason(notify.GetFailureReasonFromStatusCode(resp.StatusCode), err)
