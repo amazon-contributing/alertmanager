@@ -23,6 +23,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/alertmanager/secrets"
+
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
@@ -528,6 +530,8 @@ func TestHideConfigSecrets(t *testing.T) {
 func TestShowMarshalSecretValues(t *testing.T) {
 	MarshalSecretValue = true
 	defer func() { MarshalSecretValue = false }()
+	secrets.MarshalSecretValue = true
+	defer func() { secrets.MarshalSecretValue = false }()
 
 	c, err := LoadFile("testdata/conf.good.yml")
 	if err != nil {
