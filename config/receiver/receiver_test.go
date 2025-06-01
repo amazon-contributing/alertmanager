@@ -16,6 +16,11 @@ package receiver
 import (
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/promslog"
+
+	"github.com/prometheus/alertmanager/secrets"
+
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/stretchr/testify/require"
 
@@ -70,7 +75,8 @@ func TestBuildReceiverIntegrations(t *testing.T) {
 		},
 	} {
 		t.Run("", func(t *testing.T) {
-			integrations, err := BuildReceiverIntegrations(tc.receiver, nil, nil)
+			sp := secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer)
+			integrations, err := BuildReceiverIntegrations(tc.receiver, nil, nil, sp)
 			if tc.err {
 				require.Error(t, err)
 				return
