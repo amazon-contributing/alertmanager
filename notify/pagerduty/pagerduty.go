@@ -25,6 +25,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/prometheus/alertmanager/secrets"
+
 	"github.com/alecthomas/units"
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
@@ -45,22 +47,32 @@ const (
 
 // Notifier implements a Notifier for PagerDuty notifications.
 type Notifier struct {
-	conf    *config.PagerdutyConfig
-	tmpl    *template.Template
-	logger  *slog.Logger
-	apiV1   string // for tests.
-	client  *http.Client
-	retrier *notify.Retrier
+	conf           *config.PagerdutyConfig
+	tmpl           *template.Template
+	logger         *slog.Logger
+	apiV1          string // for tests.
+	client         *http.Client
+	retrier        *notify.Retrier
+	secretsFetcher secrets.SecretsFetcher
 }
 
 // New returns a new PagerDuty notifier.
-func New(c *config.PagerdutyConfig, t *template.Template, l *slog.Logger, httpOpts ...commoncfg.HTTPClientOption) (*Notifier, error) {
+func New(c *config.PagerdutyConfig, t *template.Template, l *slog.Logger, spRegistry *secrets.SecretsProviderRegistry, httpOpts ...commoncfg.HTTPClientOption) (*Notifier, error) {
 	client, err := commoncfg.NewClientFromConfig(*c.HTTPConfig, "pagerduty", httpOpts...)
 	if err != nil {
 		return nil, err
 	}
 	n := &Notifier{conf: c, tmpl: t, logger: l, client: client}
-	if c.ServiceKey != "" || c.ServiceKeyFile != "" {
+
+	if !c.ServiceKey.IsZero() {
+		n.secretsFetcher, err = spRegistry.RegisterSecret(c.ServiceKey)
+	} else if !c.RoutingKey.IsZero() {
+		n.secretsFetcher, err = spRegistry.RegisterSecret(c.RoutingKey)
+	}
+	if err != nil {
+		l.Error("error registering secret", "err", err)
+	}
+	if !c.ServiceKey.IsZero() || c.ServiceKeyFile != "" {
 		n.apiV1 = "https://events.pagerduty.com/generic/2010-04-15/create_event.json"
 		// Retrying can solve the issue on 403 (rate limiting) and 5xx response codes.
 		// https://v2.developer.pagerduty.com/docs/trigger-events
@@ -143,6 +155,25 @@ func (n *Notifier) encodeMessage(msg *pagerDutyMessage) (bytes.Buffer, error) {
 	return buf, nil
 }
 
+func (n *Notifier) getSecret(ctx context.Context) string {
+	var secret secrets.GenericSecret
+	if !n.conf.ServiceKey.IsZero() {
+		secret = n.conf.ServiceKey
+	} else if !n.conf.RoutingKey.IsZero() {
+		secret = n.conf.RoutingKey
+	}
+	if secret.IsZero() || n.secretsFetcher == nil {
+		return ""
+	}
+
+	sec, err := n.secretsFetcher.FetchSecret(ctx, secret)
+	if err != nil {
+		n.logger.Error("unable to fetch secret", "error", err)
+		return ""
+	}
+	return sec
+}
+
 func (n *Notifier) notifyV1(
 	ctx context.Context,
 	eventType string,
@@ -159,11 +190,11 @@ func (n *Notifier) notifyV1(
 		n.logger.Warn("Truncated description", "key", key, "max_runes", maxV1DescriptionLenRunes)
 	}
 
-	serviceKey := string(n.conf.ServiceKey)
-	if serviceKey == "" {
+	serviceKey := n.getSecret(ctx)
+	if serviceKey == "" && n.conf.ServiceKeyFile != "" {
 		content, fileErr := os.ReadFile(n.conf.ServiceKeyFile)
 		if fileErr != nil {
-			return false, fmt.Errorf("failed to read service key from file: %w", fileErr)
+			return false, notify.NewErrorWithReason(notify.ClientErrorReason, fmt.Errorf("failed to read service key from file: %w", fileErr))
 		}
 		serviceKey = strings.TrimSpace(string(content))
 	}
@@ -182,12 +213,12 @@ func (n *Notifier) notifyV1(
 	}
 
 	if tmplErr != nil {
-		return false, fmt.Errorf("failed to template PagerDuty v1 message: %w", tmplErr)
+		return false, notify.NewErrorWithReason(notify.ClientErrorReason, fmt.Errorf("failed to template PagerDuty v1 message: %w", tmplErr))
 	}
 
 	// Ensure that the service key isn't empty after templating.
 	if msg.ServiceKey == "" {
-		return false, errors.New("service key cannot be empty")
+		return false, notify.NewErrorWithReason(notify.ClientErrorReason, errors.New("service key cannot be empty"))
 	}
 
 	encodedMsg, err := n.encodeMessage(msg)
@@ -198,6 +229,9 @@ func (n *Notifier) notifyV1(
 	resp, err := notify.PostJSON(ctx, n.client, n.apiV1, &encodedMsg)
 	if err != nil {
 		return true, fmt.Errorf("failed to post message to PagerDuty v1: %w", err)
+	}
+	if resp.StatusCode == 403 {
+		n.secretsFetcher.RefreshCredentialsAsync()
 	}
 	defer notify.Drain(resp)
 
@@ -224,11 +258,11 @@ func (n *Notifier) notifyV2(
 		n.logger.Warn("Truncated summary", "key", key, "max_runes", maxV2SummaryLenRunes)
 	}
 
-	routingKey := string(n.conf.RoutingKey)
-	if routingKey == "" {
+	routingKey := n.getSecret(ctx)
+	if routingKey == "" && n.conf.RoutingKeyFile != "" {
 		content, fileErr := os.ReadFile(n.conf.RoutingKeyFile)
 		if fileErr != nil {
-			return false, fmt.Errorf("failed to read routing key from file: %w", fileErr)
+			return false, notify.NewErrorWithReason(notify.ClientErrorReason, fmt.Errorf("failed to read routing key from file: %w", fileErr))
 		}
 		routingKey = strings.TrimSpace(string(content))
 	}
@@ -276,12 +310,12 @@ func (n *Notifier) notifyV2(
 	}
 
 	if tmplErr != nil {
-		return false, fmt.Errorf("failed to template PagerDuty v2 message: %w", tmplErr)
+		return false, notify.NewErrorWithReason(notify.ClientErrorReason, fmt.Errorf("failed to template PagerDuty v2 message: %w", tmplErr))
 	}
 
 	// Ensure that the routing key isn't empty after templating.
 	if msg.RoutingKey == "" {
-		return false, errors.New("routing key cannot be empty")
+		return false, notify.NewErrorWithReason(notify.ClientErrorReason, errors.New("routing key cannot be empty"))
 	}
 
 	encodedMsg, err := n.encodeMessage(msg)
@@ -295,6 +329,9 @@ func (n *Notifier) notifyV2(
 	}
 	defer notify.Drain(resp)
 
+	if resp.StatusCode == 403 {
+		n.secretsFetcher.RefreshCredentialsAsync()
+	}
 	retry, err := n.retrier.Check(resp.StatusCode, resp.Body)
 	if err != nil {
 		return retry, notify.NewErrorWithReason(notify.GetFailureReasonFromStatusCode(resp.StatusCode), err)
