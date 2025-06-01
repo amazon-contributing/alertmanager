@@ -30,6 +30,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/alertmanager/secrets"
+	"github.com/prometheus/alertmanager/secrets/providers"
+
 	"github.com/KimMachineGun/automemlimit/memlimit"
 	"github.com/alecthomas/kingpin/v2"
 	"github.com/prometheus/client_golang/prometheus"
@@ -403,8 +406,9 @@ func run() int {
 	}
 
 	var (
-		inhibitor *inhibit.Inhibitor
-		tmpl      *template.Template
+		inhibitor               *inhibit.Inhibitor
+		tmpl                    *template.Template
+		secretsProviderRegistry *secrets.SecretsProviderRegistry
 	)
 
 	dispMetrics := dispatch.NewDispatcherMetrics(false, prometheus.DefaultRegisterer)
@@ -415,6 +419,9 @@ func run() int {
 		prometheus.DefaultRegisterer,
 		configLogger,
 	)
+	defer func() {
+		secretsProviderRegistry.Stop()
+	}()
 	configCoordinator.Subscribe(func(conf *config.Config) error {
 		tmpl, err = template.FromGlobs(conf.Templates)
 		if err != nil {
@@ -429,6 +436,15 @@ func run() int {
 			activeReceivers[r.RouteOpts.Receiver] = struct{}{}
 		})
 
+		if secretsProviderRegistry == nil {
+			secretsProviderRegistry = secrets.NewSecretsProviderRegistry(logger, prometheus.NewRegistry())
+			// currently only one secrets provider is registered. Inline secrets provider is always available
+			if secretsProviderRegistry.Register(providers.AWSSecretsManagerSecretProviderDiscoveryConfig{}) != nil {
+				configLogger.Error("failed to register secrets provider", "err", err)
+			}
+			secretsProviderRegistry.Init()
+		}
+
 		// Build the map of receiver to integrations.
 		receivers := make(map[string][]notify.Integration, len(activeReceivers))
 		var integrationsNum int
@@ -438,7 +454,7 @@ func run() int {
 				configLogger.Info("skipping creation of receiver not referenced by any route", "receiver", rcv.Name)
 				continue
 			}
-			integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, logger)
+			integrations, err := receiver.BuildReceiverIntegrations(rcv, tmpl, logger, secretsProviderRegistry)
 			if err != nil {
 				return err
 			}
@@ -464,7 +480,6 @@ func run() int {
 
 		inhibitor = inhibit.NewInhibitor(alerts, conf.InhibitRules, marker, logger)
 		silencer := silence.NewSilencer(silences, marker, logger)
-
 		// An interface value that holds a nil concrete value is non-nil.
 		// Therefore we explicly pass an empty interface, to detect if the
 		// cluster is not enabled in notify.
@@ -534,7 +549,22 @@ func run() int {
 
 		go disp.Run()
 		go inhibitor.Run()
+		inhibitor.WaitForLoading()
 
+		// next, start the dispatcher and wait for it to load before swapping the disp pointer.
+		// This ensures that the API doesn't see the new dispatcher before it finishes populating
+		// the aggrGroups
+		go newDisp.Run(startTime.Add(*DispatchStartDelay))
+		newDisp.WaitForLoading()
+		disp = newDisp
+
+		err = tracingManager.ApplyConfig(conf)
+		if err != nil {
+			return fmt.Errorf("failed to apply tracing config: %w", err)
+		}
+
+		go tracingManager.Run()
+		secretsProviderRegistry.UpdateComplete()
 		return nil
 	})
 
