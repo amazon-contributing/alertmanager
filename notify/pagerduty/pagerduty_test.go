@@ -26,6 +26,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/prometheus/alertmanager/secrets"
+
 	commoncfg "github.com/prometheus/common/config"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/common/promslog"
@@ -43,11 +47,14 @@ import (
 func TestPagerDutyRetryV1(t *testing.T) {
 	notifier, err := New(
 		&config.PagerdutyConfig{
-			ServiceKey: commoncfg.Secret("01234567890123456789012345678901"),
+			ServiceKey: secrets.GenericSecret{
+				Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+			},
 			HTTPConfig: &commoncfg.HTTPClientConfig{},
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 
@@ -61,11 +68,14 @@ func TestPagerDutyRetryV1(t *testing.T) {
 func TestPagerDutyRetryV2(t *testing.T) {
 	notifier, err := New(
 		&config.PagerdutyConfig{
-			RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
+			RoutingKey: secrets.GenericSecret{
+				Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+			},
 			HTTPConfig: &commoncfg.HTTPClientConfig{},
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 
@@ -83,11 +93,14 @@ func TestPagerDutyRedactedURLV1(t *testing.T) {
 	key := "01234567890123456789012345678901"
 	notifier, err := New(
 		&config.PagerdutyConfig{
-			ServiceKey: commoncfg.Secret(key),
+			ServiceKey: secrets.GenericSecret{
+				Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+			},
 			HTTPConfig: &commoncfg.HTTPClientConfig{},
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 	notifier.apiV1 = u.String()
@@ -102,12 +115,15 @@ func TestPagerDutyRedactedURLV2(t *testing.T) {
 	key := "01234567890123456789012345678901"
 	notifier, err := New(
 		&config.PagerdutyConfig{
-			URL:        &amcommoncfg.URL{URL: u},
-			RoutingKey: commoncfg.Secret(key),
+			URL: &config.URL{URL: u},
+			RoutingKey: secrets.GenericSecret{
+				Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+			},
 			HTTPConfig: &commoncfg.HTTPClientConfig{},
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 
@@ -131,6 +147,7 @@ func TestPagerDutyV1ServiceKeyFromFile(t *testing.T) {
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 	notifier.apiV1 = u.String()
@@ -156,6 +173,7 @@ func TestPagerDutyV2RoutingKeyFromFile(t *testing.T) {
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 
@@ -184,7 +202,9 @@ func TestPagerDutyTemplating(t *testing.T) {
 		{
 			title: "full-blown legacy message",
 			cfg: &config.PagerdutyConfig{
-				RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
 				Images: []config.PagerdutyImage{
 					{
 						Src:  "{{ .Status }}",
@@ -209,7 +229,9 @@ func TestPagerDutyTemplating(t *testing.T) {
 		{
 			title: "full-blown legacy message",
 			cfg: &config.PagerdutyConfig{
-				RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
 				Images: []config.PagerdutyImage{
 					{
 						Src:  "{{ .Status }}",
@@ -234,7 +256,9 @@ func TestPagerDutyTemplating(t *testing.T) {
 		{
 			title: "nested details",
 			cfg: &config.PagerdutyConfig{
-				RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
 				Details: map[string]any{
 					"a": map[string]any{
 						"b": map[string]any{
@@ -252,7 +276,9 @@ func TestPagerDutyTemplating(t *testing.T) {
 		{
 			title: "nested details with template error",
 			cfg: &config.PagerdutyConfig{
-				RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
 				Details: map[string]any{
 					"a": map[string]any{
 						"b": map[string]any{
@@ -268,7 +294,9 @@ func TestPagerDutyTemplating(t *testing.T) {
 		{
 			title: "details with templating errors",
 			cfg: &config.PagerdutyConfig{
-				RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
 				Details: map[string]any{
 					"firing":       `{{ .Alerts.Firing | toJson`,
 					"resolved":     `{{ .Alerts.Resolved | toJson }}`,
@@ -281,38 +309,69 @@ func TestPagerDutyTemplating(t *testing.T) {
 		{
 			title: "v2 message with templating errors",
 			cfg: &config.PagerdutyConfig{
-				RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
-				Severity:   "{{ ",
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
+				Severity: "{{ ",
 			},
 			errMsg: "failed to template",
 		},
 		{
 			title: "v1 message with templating errors",
 			cfg: &config.PagerdutyConfig{
-				ServiceKey: commoncfg.Secret("01234567890123456789012345678901"),
-				Client:     "{{ ",
+				ServiceKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
+				Client: "{{ ",
 			},
 			errMsg: "failed to template",
 		},
 		{
 			title: "routing key cannot be empty",
 			cfg: &config.PagerdutyConfig{
-				RoutingKey: commoncfg.Secret(`{{ "" }}`),
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: `{{ "" }}`},
+				},
 			},
 			errMsg: "routing key cannot be empty",
 		},
 		{
 			title: "service_key cannot be empty",
 			cfg: &config.PagerdutyConfig{
-				ServiceKey: commoncfg.Secret(`{{ "" }}`),
+				ServiceKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: `{{ "" }}`},
+				},
 			},
 			errMsg: "service key cannot be empty",
+		},
+		{
+			title: "service_key cannot be empty - AWS Secrets Manager",
+			cfg: &config.PagerdutyConfig{
+				ServiceKey: secrets.GenericSecret{
+					AWSSecretsManagerConfig: secrets.AWSSecretsManagerConfig{
+						SecretARN: `{{ "" }}`,
+					},
+				},
+			},
+			errMsg: "service key cannot be empty",
+		},
+		{
+			title: "routing_key cannot be empty - AWS Secrets Manager",
+			cfg: &config.PagerdutyConfig{
+				RoutingKey: secrets.GenericSecret{
+					AWSSecretsManagerConfig: secrets.AWSSecretsManagerConfig{
+						SecretARN: `{{ "" }}`,
+					},
+				},
+			},
+			errMsg: "routing key cannot be empty",
 		},
 	} {
 		t.Run(tc.title, func(t *testing.T) {
 			tc.cfg.URL = &amcommoncfg.URL{URL: u}
 			tc.cfg.HTTPConfig = &commoncfg.HTTPClientConfig{}
-			pd, err := New(tc.cfg, test.CreateTmpl(t), promslog.NewNopLogger())
+			spRegistry := secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer)
+			pd, err := New(tc.cfg, test.CreateTmpl(t), promslog.NewNopLogger(), spRegistry)
 			require.NoError(t, err)
 			if pd.apiV1 != "" {
 				pd.apiV1 = u.String()
@@ -399,11 +458,14 @@ func TestEventSizeEnforcement(t *testing.T) {
 
 	notifierV1, err := New(
 		&config.PagerdutyConfig{
-			ServiceKey: commoncfg.Secret("01234567890123456789012345678901"),
+			ServiceKey: secrets.GenericSecret{
+				Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+			},
 			HTTPConfig: &commoncfg.HTTPClientConfig{},
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 
@@ -422,11 +484,14 @@ func TestEventSizeEnforcement(t *testing.T) {
 
 	notifierV2, err := New(
 		&config.PagerdutyConfig{
-			RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
+			RoutingKey: secrets.GenericSecret{
+				Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+			},
 			HTTPConfig: &commoncfg.HTTPClientConfig{},
 		},
 		test.CreateTmpl(t),
 		promslog.NewNopLogger(),
+		secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer),
 	)
 	require.NoError(t, err)
 
@@ -535,13 +600,15 @@ func TestPagerDutyEmptySrcHref(t *testing.T) {
 
 	pagerDutyConfig := config.PagerdutyConfig{
 		HTTPConfig: &commoncfg.HTTPClientConfig{},
-		RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
-		URL:        &amcommoncfg.URL{URL: url},
-		Images:     images,
-		Links:      links,
+		RoutingKey: secrets.GenericSecret{
+			Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+		},
+		URL:    &config.URL{URL: url},
+		Images: images,
+		Links:  links,
 	}
 
-	pagerDuty, err := New(&pagerDutyConfig, test.CreateTmpl(t), promslog.NewNopLogger())
+	pagerDuty, err := New(&pagerDutyConfig, test.CreateTmpl(t), promslog.NewNopLogger(), secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer))
 	require.NoError(t, err)
 
 	ctx := context.Background()
@@ -603,12 +670,14 @@ func TestPagerDutyTimeout(t *testing.T) {
 
 			cfg := config.PagerdutyConfig{
 				HTTPConfig: &commoncfg.HTTPClientConfig{},
-				RoutingKey: commoncfg.Secret("01234567890123456789012345678901"),
-				URL:        &amcommoncfg.URL{URL: u},
-				Timeout:    tt.timeout,
+				RoutingKey: secrets.GenericSecret{
+					Inline: secrets.Inline{Secret: "01234567890123456789012345678901"},
+				},
+				URL:     &config.URL{URL: u},
+				Timeout: tt.timeout,
 			}
 
-			pd, err := New(&cfg, test.CreateTmpl(t), promslog.NewNopLogger())
+			pd, err := New(&cfg, test.CreateTmpl(t), promslog.NewNopLogger(), secrets.NewSecretsProviderRegistry(promslog.NewNopLogger(), prometheus.DefaultRegisterer))
 			require.NoError(t, err)
 
 			ctx := context.Background()

@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/alertmanager/secrets"
+
 	commoncfg "github.com/prometheus/common/config"
 
 	amcommoncfg "github.com/prometheus/alertmanager/config/common"
@@ -279,22 +281,22 @@ type PagerdutyConfig struct {
 
 	HTTPConfig *commoncfg.HTTPClientConfig `yaml:"http_config,omitempty" json:"http_config,omitempty"`
 
-	ServiceKey     commoncfg.Secret `yaml:"service_key,omitempty" json:"service_key,omitempty"`
-	ServiceKeyFile string           `yaml:"service_key_file,omitempty" json:"service_key_file,omitempty"`
-	RoutingKey     commoncfg.Secret `yaml:"routing_key,omitempty" json:"routing_key,omitempty"`
-	RoutingKeyFile string           `yaml:"routing_key_file,omitempty" json:"routing_key_file,omitempty"`
-	URL            *amcommoncfg.URL `yaml:"url,omitempty" json:"url,omitempty"`
-	Client         string           `yaml:"client,omitempty" json:"client,omitempty"`
-	ClientURL      string           `yaml:"client_url,omitempty" json:"client_url,omitempty"`
-	Description    string           `yaml:"description,omitempty" json:"description,omitempty"`
-	Details        map[string]any   `yaml:"details,omitempty" json:"details,omitempty"`
-	Images         []PagerdutyImage `yaml:"images,omitempty" json:"images,omitempty"`
-	Links          []PagerdutyLink  `yaml:"links,omitempty" json:"links,omitempty"`
-	Source         string           `yaml:"source,omitempty" json:"source,omitempty"`
-	Severity       string           `yaml:"severity,omitempty" json:"severity,omitempty"`
-	Class          string           `yaml:"class,omitempty" json:"class,omitempty"`
-	Component      string           `yaml:"component,omitempty" json:"component,omitempty"`
-	Group          string           `yaml:"group,omitempty" json:"group,omitempty"`
+	ServiceKey     secrets.GenericSecret `yaml:"service_key,omitempty" json:"service_key,omitempty"`
+	ServiceKeyFile string                `yaml:"service_key_file,omitempty" json:"service_key_file,omitempty"`
+	RoutingKey     secrets.GenericSecret `yaml:"routing_key,omitempty" json:"routing_key,omitempty"`
+	RoutingKeyFile string                `yaml:"routing_key_file,omitempty" json:"routing_key_file,omitempty"`
+	URL            *URL                  `yaml:"url,omitempty" json:"url,omitempty"`
+	Client         string                `yaml:"client,omitempty" json:"client,omitempty"`
+	ClientURL      string                `yaml:"client_url,omitempty" json:"client_url,omitempty"`
+	Description    string                `yaml:"description,omitempty" json:"description,omitempty"`
+	Details        map[string]any        `yaml:"details,omitempty" json:"details,omitempty"`
+	Images         []PagerdutyImage      `yaml:"images,omitempty" json:"images,omitempty"`
+	Links          []PagerdutyLink       `yaml:"links,omitempty" json:"links,omitempty"`
+	Source         string                `yaml:"source,omitempty" json:"source,omitempty"`
+	Severity       string                `yaml:"severity,omitempty" json:"severity,omitempty"`
+	Class          string                `yaml:"class,omitempty" json:"class,omitempty"`
+	Component      string                `yaml:"component,omitempty" json:"component,omitempty"`
+	Group          string                `yaml:"group,omitempty" json:"group,omitempty"`
 	// Timeout is the maximum time allowed to invoke the pagerduty. Setting this to 0
 	// does not impose a timeout.
 	Timeout time.Duration `yaml:"timeout" json:"timeout"`
@@ -313,6 +315,10 @@ type PagerdutyImage struct {
 	Href string `yaml:"href,omitempty" json:"href,omitempty"`
 }
 
+func (c *PagerdutyConfig) isKeyZero() bool {
+	return c.ServiceKey.IsZero() && c.RoutingKey.IsZero()
+}
+
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
 func (c *PagerdutyConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultPagerdutyConfig
@@ -320,13 +326,13 @@ func (c *PagerdutyConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	if err := unmarshal((*plain)(c)); err != nil {
 		return err
 	}
-	if c.RoutingKey == "" && c.ServiceKey == "" && c.RoutingKeyFile == "" && c.ServiceKeyFile == "" {
+	if c.isKeyZero() && c.RoutingKeyFile == "" && c.ServiceKeyFile == "" {
 		return errors.New("missing service or routing key in PagerDuty config")
 	}
-	if len(c.RoutingKey) > 0 && len(c.RoutingKeyFile) > 0 {
+	if !c.RoutingKey.IsZero() && len(c.RoutingKeyFile) > 0 {
 		return errors.New("at most one of routing_key & routing_key_file must be configured")
 	}
-	if len(c.ServiceKey) > 0 && len(c.ServiceKeyFile) > 0 {
+	if !c.ServiceKey.IsZero() && len(c.ServiceKeyFile) > 0 {
 		return errors.New("at most one of service_key & service_key_file must be configured")
 	}
 	if c.Details == nil {
