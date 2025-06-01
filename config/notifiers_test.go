@@ -142,7 +142,7 @@ routing_key_file: 'xyz'
 func TestPagerdutyServiceKey(t *testing.T) {
 	t.Run("error if no service key or key file", func(t *testing.T) {
 		in := `
-service_key: ''
+service_key:
 `
 		var cfg PagerdutyConfig
 		err := yaml.UnmarshalStrict([]byte(in), &cfg)
