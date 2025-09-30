@@ -145,6 +145,10 @@ func (a *AWSSecretsManagerProvider) Register(secret secrets.GenericSecret) secre
 	a.mtx.Lock()
 	defer a.mtx.Unlock()
 	if f, OK := a.fetchers[s.SecretARN]; OK {
+		if s.RefreshInterval <= 0 {
+			a.logger.Info("setting default refresh interval for", "ARN", s.SecretARN)
+			s.RefreshInterval = time.Minute * 5
+		}
 		a.logger.Info("found an existing secret fetcher", "ARN", s.SecretARN)
 		f.update(s.RefreshInterval)
 		a.newFetchers[s.SecretARN] = struct{}{}
