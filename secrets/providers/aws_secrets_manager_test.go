@@ -428,6 +428,37 @@ func TestRegisterSecret(t *testing.T) {
 	provider.Stop()
 }
 
+func TestRegisterMultipleSecretsNoRefreshInterval(t *testing.T) {
+	reg := prometheus.NewPedanticRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	options := secrets.SecretProviderOptions{
+		Logger:     promslog.NewNopLogger(),
+		Registerer: reg,
+		Context:    ctx,
+	}
+	provider := NewAWSSecretsManagerProvider(options)
+	secretOne := secrets.GenericSecret{
+		AWSSecretsManagerConfig: secrets.AWSSecretsManagerConfig{
+			SecretARN: "arn:aws:secretsmanager:us-west-2:123456789:secret:receiver-pager-duty",
+			SecretKey: "key1",
+		},
+	}
+	secretOneCopy := secrets.GenericSecret{
+		AWSSecretsManagerConfig: secrets.AWSSecretsManagerConfig{
+			SecretARN: "arn:aws:secretsmanager:us-west-2:123456789:secret:receiver-pager-duty",
+			SecretKey: "key2",
+		},
+	}
+	provider.Register(secretOne)
+	require.Equal(t, 1, provider.fetchersCount())
+
+	provider.Register(secretOneCopy)
+	require.Equal(t, 1, provider.fetchersCount())
+
+	cancel()
+	provider.Stop()
+}
+
 type MockSecretsManagerClient struct {
 	secretsmanager.Client
 	secrets            map[string]string
