@@ -897,14 +897,15 @@ type SNSConfig struct {
 
 	HTTPConfig *commoncfg.HTTPClientConfig `yaml:"http_config,omitempty" json:"http_config,omitempty"`
 
-	APIUrl      string            `yaml:"api_url,omitempty" json:"api_url,omitempty"`
-	Sigv4       sigv4.SigV4Config `yaml:"sigv4" json:"sigv4"`
-	TopicARN    string            `yaml:"topic_arn,omitempty" json:"topic_arn,omitempty"`
-	PhoneNumber string            `yaml:"phone_number,omitempty" json:"phone_number,omitempty"`
-	TargetARN   string            `yaml:"target_arn,omitempty" json:"target_arn,omitempty"`
-	Subject     string            `yaml:"subject,omitempty" json:"subject,omitempty"`
-	Message     string            `yaml:"message,omitempty" json:"message,omitempty"`
-	Attributes  map[string]string `yaml:"attributes,omitempty" json:"attributes,omitempty"`
+	APIUrl       string            `yaml:"api_url,omitempty" json:"api_url,omitempty"`
+	Sigv4        sigv4.SigV4Config `yaml:"sigv4" json:"sigv4"`
+	TopicARN     string            `yaml:"topic_arn,omitempty" json:"topic_arn,omitempty"`
+	PhoneNumber  string            `yaml:"phone_number,omitempty" json:"phone_number,omitempty"`
+	TargetARN    string            `yaml:"target_arn,omitempty" json:"target_arn,omitempty"`
+	Subject      string            `yaml:"subject,omitempty" json:"subject,omitempty"`
+	Message      string            `yaml:"message,omitempty" json:"message,omitempty"`
+	Attributes   map[string]string `yaml:"attributes,omitempty" json:"attributes,omitempty"`
+	WorkspaceArn string            `yaml:"workspace_arn,omitempty" json:"workspace_arn,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
