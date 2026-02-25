@@ -55,6 +55,14 @@ func New(c *config.SNSConfig, t *template.Template, l *slog.Logger, httpOpts ...
 	if err != nil {
 		return nil, err
 	}
+
+	// Custom AWS Round Tripper
+	client.Transport, err = newConfusedDeputyRoundTripper(c, client.Transport)
+
+	if err != nil {
+		return nil, err
+	}
+
 	return &Notifier{
 		conf:    c,
 		tmpl:    t,
