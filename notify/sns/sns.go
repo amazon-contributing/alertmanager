@@ -77,7 +77,19 @@ func newSNSHTTPClient(c *config.SNSConfig, httpOpts ...commoncfg.HTTPClientOptio
 	if c.UseAWSHTTPClient || os.Getenv("AWS_CA_BUNDLE") != "" {
 		return newAWSBuildableClient(c)
 	}
-	return notify.NewClientWithTracing(*c.HTTPConfig, "sns", httpOpts...)
+	// HTTP/2 is disabled for SNS: the AWS endpoints combined with Go's HTTP/2
+	// transport can produce intermittent stream errors, so we force HTTP/1.1.
+	client, err := notify.NewClientWithTracing(*c.HTTPConfig, "sns", append(httpOpts, commoncfg.WithHTTP2Disabled())...)
+	if err != nil {
+		return nil, err
+	}
+	// When a workspace ARN is configured, wrap the transport so every request
+	// carries the AWS "confused deputy" protection headers.
+	client.Transport, err = newConfusedDeputyRoundTripper(c, client.Transport)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 // newAWSBuildableClient builds a BuildableClient pre-configured with the

@@ -285,7 +285,7 @@ type PagerdutyConfig struct {
 	ServiceKeyFile string                `yaml:"service_key_file,omitempty" json:"service_key_file,omitempty"`
 	RoutingKey     secrets.GenericSecret `yaml:"routing_key,omitempty" json:"routing_key,omitempty"`
 	RoutingKeyFile string                `yaml:"routing_key_file,omitempty" json:"routing_key_file,omitempty"`
-	URL            *URL                  `yaml:"url,omitempty" json:"url,omitempty"`
+	URL            *amcommoncfg.URL      `yaml:"url,omitempty" json:"url,omitempty"`
 	Client         string                `yaml:"client,omitempty" json:"client,omitempty"`
 	ClientURL      string                `yaml:"client_url,omitempty" json:"client_url,omitempty"`
 	Description    string                `yaml:"description,omitempty" json:"description,omitempty"`
@@ -725,14 +725,15 @@ type SNSConfig struct {
 
 	HTTPConfig *commoncfg.HTTPClientConfig `yaml:"http_config,omitempty" json:"http_config,omitempty"`
 
-	APIUrl      string            `yaml:"api_url,omitempty" json:"api_url,omitempty"`
-	Sigv4       sigv4.SigV4Config `yaml:"sigv4" json:"sigv4"`
-	TopicARN    string            `yaml:"topic_arn,omitempty" json:"topic_arn,omitempty"`
-	PhoneNumber string            `yaml:"phone_number,omitempty" json:"phone_number,omitempty"`
-	TargetARN   string            `yaml:"target_arn,omitempty" json:"target_arn,omitempty"`
-	Subject     string            `yaml:"subject,omitempty" json:"subject,omitempty"`
-	Message     string            `yaml:"message,omitempty" json:"message,omitempty"`
-	Attributes  map[string]string `yaml:"attributes,omitempty" json:"attributes,omitempty"`
+	APIUrl       string            `yaml:"api_url,omitempty" json:"api_url,omitempty"`
+	Sigv4        sigv4.SigV4Config `yaml:"sigv4" json:"sigv4"`
+	TopicARN     string            `yaml:"topic_arn,omitempty" json:"topic_arn,omitempty"`
+	PhoneNumber  string            `yaml:"phone_number,omitempty" json:"phone_number,omitempty"`
+	TargetARN    string            `yaml:"target_arn,omitempty" json:"target_arn,omitempty"`
+	Subject      string            `yaml:"subject,omitempty" json:"subject,omitempty"`
+	Message      string            `yaml:"message,omitempty" json:"message,omitempty"`
+	Attributes   map[string]string `yaml:"attributes,omitempty" json:"attributes,omitempty"`
+	WorkspaceArn string            `yaml:"workspace_arn,omitempty" json:"workspace_arn,omitempty"`
 	// UseAWSHTTPClient forces the AWS SDK's BuildableClient instead of
 	// alertmanager's tracing-wrapped HTTP client. Auto-enabled when AWS_CA_BUNDLE
 	// is set; set explicitly when configuring ca_bundle via shared AWS config.
