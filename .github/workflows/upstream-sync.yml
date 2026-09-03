@@ -1,0 +1,53 @@
+name: upstream-sync
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "Upstream ref/commit to sync to (default: upstream default branch)"
+        required: false
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+env:
+  UPSTREAM: https://github.com/prometheus/alertmanager
+  UPSTREAM_BRANCH: main
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Attempt merge
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_REF: ${{ github.event.inputs.upstream_ref }}
+        run: |
+          set -euo pipefail
+          git config user.name "aws-fork-bot" && git config user.email "noreply@amazon.com"
+          git remote add upstream "$UPSTREAM"
+          git fetch -q upstream
+          REF="$INPUT_REF"
+          REF="${REF:-upstream/$UPSTREAM_BRANCH}"
+          TARGET=$(git rev-parse "$REF")
+          if git merge-base --is-ancestor "$TARGET" HEAD; then
+            echo "Already contains $TARGET — nothing to sync."; exit 0
+          fi
+          B="sync/upstream-$(date +%Y-%m-%d)"
+          git checkout -b "$B"
+          BEFORE=$(git rev-parse HEAD)
+          if git merge --no-ff -m "Merge upstream ($TARGET) into main" "$TARGET"; then
+            git push -u origin "$B"
+            gh pr create --base main --head "$B" \
+              --title "Upstream sync $(date +%Y-%m-%d)" \
+              --body "$(printf 'Merges upstream %s.\n\nUpstream range (first 50):\n%s' "$TARGET" \
+                "$(git log --oneline "$BEFORE".."$TARGET" | head -50)")"
+          else
+            CONFLICTS=$(git diff --name-only --diff-filter=U)
+            git merge --abort
+            git push -u origin "$B"
+            gh issue create --title "Upstream sync $(date +%Y-%m-%d): merge conflicts" \
+              --body "$(printf 'Merging upstream %s conflicts in:\n\n```\n%s\n```\nFinish it:\n```\ngit fetch origin && git checkout %s\ngit fetch %s %s && git merge %s\n# resolve, then: git push && gh pr create --base main --head %s\n```' \
+                "$TARGET" "$CONFLICTS" "$B" "$UPSTREAM" "$UPSTREAM_BRANCH" "$TARGET" "$B")"
+          fi
