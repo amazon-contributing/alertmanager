@@ -1,14 +1,15 @@
 # AWS Changes vs upstream
 
 Auto-generated — do not edit by hand. Delta of `main` vs `upstream/main` (patch-id aware: upstream-absorbed changes drop out automatically).
-**Total carried changes: 7**
+**Total carried changes: 8**
 
-Generated from `main` @ `4b9ffc30c8` vs `upstream/main` on 2026-09-03 01:05 UTC.
+Generated from `main` @ `1b55bb5e86` vs `upstream/main` on 2026-09-03 01:14 UTC.
 
 ## Build/tooling
 
 | Change | Owner | Upstream status | PR | Issue | Commit |
 |---|---|---|---|---|---|
+| Disable Dependabot version updates: bumps come from upstream via sync (#31) | - | none | - | - | [`1b55bb5e86`](https://github.com/amazon-contributing/alertmanager/commit/1b55bb5e86f1fe4b6372cbbf53a7a4a047731080) |
 | Add fork governance: CODEOWNERS, CI, trailer lint, manifest and sync workflows (#30) | - | none | - | - | [`4b9ffc30c8`](https://github.com/amazon-contributing/alertmanager/commit/4b9ffc30c8c3a5a72d77c688bc65d21f189d4b0e) |
 
 ## Legacy (pre-process, no trailers)
