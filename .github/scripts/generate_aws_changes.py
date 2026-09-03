@@ -33,20 +33,27 @@ TITLES = {"feature": "Features", "fix": "Fixes", "backport": "Backports from ups
 REVERT_RE = re.compile(r"This reverts commit ([0-9a-f]{7,40})")
 REVERT_SUBJ_RE = re.compile(r'^Revert "(.+)"\s*$')
 
-PRODUCT_PREFIXES = ("pkg/", "cmd/", "tools/")
+# Dependency wiring and CI/tooling paths. Deliberately an ALLOW-list: a commit is
+# release plumbing only when every path it touches is in here, so an unfamiliar
+# repo layout can never make a real source change look like plumbing and vanish.
+DEP_EXACT = {"go.mod", "go.sum", "go.work", "go.work.sum"}
+DEP_PREFIXES = ("vendor/", ".github/")
 
-def is_product_source(path):
-    """Shipped Go source — excludes tests and testdata fixtures."""
-    if not path.startswith(PRODUCT_PREFIXES):
-        return False
-    return not (path.endswith("_test.go") or "/testdata/" in path)
+def is_dependency_wiring(path):
+    return path in DEP_EXACT or path.startswith(DEP_PREFIXES)
 
 def is_release_plumbing(paths):
-    """Dependency pin + vendor churn with no shipped-code change."""
+    """Dependency pin + vendor churn and nothing else.
+
+    Keyed on what the commit touches, never on a repo's directory layout: the
+    five dependency forks are flat (config/, notify/, tsdb/), not pkg/cmd/tools
+    like Cortex, and an allow-list keyed on Cortex's layout silently dropped a
+    real carried change (alertmanager "Add wsARN for SNS Config").
+    """
     if not paths:
         return False
-    touches_deps = any(p in ("go.mod", "go.sum") or p.startswith("vendor/") for p in paths)
-    return touches_deps and not any(is_product_source(p) for p in paths)
+    touches_deps = any(p in DEP_EXACT or p.startswith("vendor/") for p in paths)
+    return touches_deps and all(is_dependency_wiring(p) for p in paths)
 
 def files_by_commit(upstream_ref):
     """sha -> set(changed paths) for the same range the manifest covers."""
