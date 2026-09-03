@@ -1,0 +1,25 @@
+name: aws-fork-ci
+on:
+  pull_request:
+    branches: [main, "release-*"]
+  push:
+    branches: [main]
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: |
+          go build ./...
+          # Acceptance tests (test/cli, test/with_api_v2) exec these binaries from
+          # the repo root; amtool's version test needs the version stamped in.
+          go build -ldflags "-X github.com/prometheus/common/version.Version=$(cat VERSION)" -o alertmanager ./cmd/alertmanager
+          go build -ldflags "-X github.com/prometheus/common/version.Version=$(cat VERSION)" -o amtool ./cmd/amtool
+      - name: Unit tests
+        run: go test -short -timeout 45m ./...
