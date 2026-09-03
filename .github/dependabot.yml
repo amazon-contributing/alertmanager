@@ -1,8 +1,22 @@
+# AWS FORK: Dependabot version updates are disabled here.
+#
+# This is a fork. Dependency bumps must arrive from upstream through the
+# upstream-sync merge, not be applied independently:
+#   * github-actions bumps to upstream-owned workflows would create a permanent
+#     fork divergence that conflicts on every sync, for a change we do not own.
+#   * gomod bumps would rewrite go.mod/go.sum and collide with the `replace`
+#     pins that wire this fork into the AMP Cortex build.
+#
+# A zero open-PR limit disables version updates per ecosystem while leaving the
+# config valid, so Dependabot raises no config error. Bumps to the fork's own
+# workflows (.github/workflows/aws-*.yml, trailer-lint, upstream-sync) are made
+# by hand when we want them.
+
 version: 2
 updates:
   - package-ecosystem: "gomod"
     directory: "/"
-    open-pull-requests-limit: 20
+    open-pull-requests-limit: 0
     schedule:
       interval: "monthly"
     groups:
@@ -14,16 +28,18 @@ updates:
         patterns:
           - "go.opentelemetry.io/*"
   - package-ecosystem: "docker"
+    open-pull-requests-limit: 0
     directory: "/"
     schedule:
       interval: "monthly"
   - package-ecosystem: "github-actions"
+    open-pull-requests-limit: 0
     directory: "/"
     schedule:
       interval: "monthly"
   - package-ecosystem: "npm"
     directory: "/ui/mantine-ui"
-    open-pull-requests-limit: 20
+    open-pull-requests-limit: 0
     schedule:
       interval: "monthly"
     groups:
