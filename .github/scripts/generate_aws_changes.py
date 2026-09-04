@@ -24,7 +24,8 @@ FMT = FS.join(["%H", "%s", "%b", "%ae", "%ce",
                "%(trailers:key=Upstream-PR,valueonly,separator=)",
                "%(trailers:key=Issue,valueonly,separator=)",
                "%(trailers:key=AWS-Owner,valueonly,separator=)",
-               "%(trailers:key=Reverts-AWS-Change,valueonly,separator=)"]) + RS
+               "%(trailers:key=Reverts-AWS-Change,valueonly,separator=)",
+               "%(trailers:key=AWS-Manifest,valueonly,separator=)"]) + RS
 ORDER = ["feature", "fix", "backport", "build", "revert", "legacy"]
 TITLES = {"feature": "Features", "fix": "Fixes", "backport": "Backports from upstream",
           "build": "Build/tooling",
@@ -134,9 +135,11 @@ def main():
         if not rec:
             continue
         (sha, subj, body, aemail, cemail, change, ustatus, upr, issue,
-         otrailer, reverts) = (rec.split(FS) + [""] * 11)[:11]
+         otrailer, reverts, manifest) = (rec.split(FS) + [""] * 12)[:12]
         if subj.strip() == "Regenerate AWS-CHANGES.md" and aemail == "noreply@amazon.com":
             continue   # the manifest workflow's own commits must not appear in the manifest
+        if manifest.splitlines()[0].strip() == "omit" if manifest else False:
+            continue   # AWS-Manifest: omit — internal churn (e.g. add+remove of our own tooling), not a carried change
         records.append({
             "sha": sha,
             "subj": subj,
