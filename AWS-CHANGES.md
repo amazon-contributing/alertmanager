@@ -1,14 +1,15 @@
 # AWS Changes vs upstream
 
 Auto-generated — do not edit by hand. Delta of `main` vs `upstream/main` (patch-id aware: upstream-absorbed changes drop out automatically).
-**Total carried changes: 10**
+**Total carried changes: 11**
 
-Generated from `main` @ `55618e3622` vs `upstream/main` on 2026-09-07 08:20 UTC.
+Generated from `main` @ `584911dd1e` vs `upstream/main` on 2026-09-08 22:44 UTC.
 
 ## Build/tooling
 
 | Change | Owner | Upstream status | PR | Issue | Commit |
 |---|---|---|---|---|---|
+| Add Slack PR-notification workflow (aws-pr-slack-notify) (#42) | - | none | - | PROMET-12340 | [`584911dd1e`](https://github.com/amazon-contributing/alertmanager/commit/584911dd1e46d88780df24895428f27f45e3be0e) |
 | Sync manifest generator: key release-plumbing on paths, not layout (#33) | - | none | - | - | [`a5ad3a0bf8`](https://github.com/amazon-contributing/alertmanager/commit/a5ad3a0bf814f20a9b20847e90f0681dcecf357b) |
 | Disable Dependabot version updates: bumps come from upstream via sync (#31) | - | none | - | - | [`1b55bb5e86`](https://github.com/amazon-contributing/alertmanager/commit/1b55bb5e86f1fe4b6372cbbf53a7a4a047731080) |
 | Add fork governance: CODEOWNERS, CI, trailer lint, manifest and sync workflows (#30) | - | none | - | - | [`4b9ffc30c8`](https://github.com/amazon-contributing/alertmanager/commit/4b9ffc30c8c3a5a72d77c688bc65d21f189d4b0e) |
