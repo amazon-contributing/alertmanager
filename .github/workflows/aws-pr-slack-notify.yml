@@ -1,0 +1,41 @@
+name: aws-pr-slack-notify
+# Posts a Slack notification when a PR is opened / reopened / marked ready on
+# this fork, so reviewers hear about PRs without polling GitHub. Part of the
+# AMP Cortex fork process. Safe no-op when the SLACK_WEBHOOK repo secret is
+# not configured.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+permissions:
+  contents: read
+jobs:
+  notify:
+    # Skip drafts; ready_for_review fires when a draft becomes ready.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post PR notification to Slack
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          EVENT_ACTION: ${{ github.event.action }}
+          REPO: ${{ github.repository }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SLACK_WEBHOOK:-}" ]; then
+            echo "SLACK_WEBHOOK not set; skipping Slack notification."
+            exit 0
+          fi
+          case "$EVENT_ACTION" in
+            opened)           label="PR Opened" ;;
+            reopened)         label="PR Reopened" ;;
+            ready_for_review) label="PR Ready for review" ;;
+            *)                label="PR $EVENT_ACTION" ;;
+          esac
+          jq -nc \
+            --arg label "$label" --arg repo "$REPO" --arg title "$PR_TITLE" \
+            --arg url "$PR_URL" --arg author "$PR_AUTHOR" \
+            '{message: ":star: [GitHub] [\($label)] [\($repo)] \($title)\nlink: \($url)\nauthor: \($author)"}' \
+            | curl -sS -X POST -H 'Content-type: application/json' -d @- "$SLACK_WEBHOOK"
