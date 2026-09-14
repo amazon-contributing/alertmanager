@@ -3,7 +3,7 @@
 Auto-generated — do not edit by hand. Delta of `main` vs `upstream/main` (patch-id aware: upstream-absorbed changes drop out automatically).
 **Total carried changes: 11**
 
-Generated from `main` @ `584911dd1e` vs `upstream/main` on 2026-09-08 22:44 UTC.
+Generated from `main` @ `584911dd1e` vs `upstream/main` on 2026-09-14 08:20 UTC.
 
 ## Build/tooling
 
