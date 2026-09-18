@@ -1,7 +1,7 @@
 name: trailer-lint
 on:
   pull_request:
-    branches: [main]
+    branches: [cortex-main]
 jobs:
   trailer-lint:
     if: ${{ !startsWith(github.head_ref, 'sync/upstream-') }}
