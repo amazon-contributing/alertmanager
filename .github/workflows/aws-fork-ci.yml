@@ -1,9 +1,9 @@
 name: aws-fork-ci
 on:
   pull_request:
-    branches: [main, "release-*"]
+    branches: [cortex-main, "release-*"]
   push:
-    branches: [main]
+    branches: [cortex-main]
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
