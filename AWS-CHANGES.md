@@ -1,14 +1,15 @@
 # AWS Changes vs upstream
 
 Auto-generated — do not edit by hand. Delta of `main` vs `upstream/main` (patch-id aware: upstream-absorbed changes drop out automatically).
-**Total carried changes: 11**
+**Total carried changes: 12**
 
-Generated from `main` @ `584911dd1e` vs `upstream/main` on 2026-09-14 08:20 UTC.
+Generated from `cortex-main` @ `e4b8106a29` vs `upstream/main` on 2026-09-18 18:33 UTC.
 
 ## Build/tooling
 
 | Change | Owner | Upstream status | PR | Issue | Commit |
 |---|---|---|---|---|---|
+| ci: run AWS fork workflows on cortex-main instead of main (#50) | wilsnlaa | none | - | PROMET-12348 | [`e4b8106a29`](https://github.com/amazon-contributing/alertmanager/commit/e4b8106a290874cba0a23a850b7022e78b669aad) |
 | Add Slack PR-notification workflow (aws-pr-slack-notify) (#42) | - | none | - | PROMET-12340 | [`584911dd1e`](https://github.com/amazon-contributing/alertmanager/commit/584911dd1e46d88780df24895428f27f45e3be0e) |
 | Sync manifest generator: key release-plumbing on paths, not layout (#33) | - | none | - | - | [`a5ad3a0bf8`](https://github.com/amazon-contributing/alertmanager/commit/a5ad3a0bf814f20a9b20847e90f0681dcecf357b) |
 | Disable Dependabot version updates: bumps come from upstream via sync (#31) | - | none | - | - | [`1b55bb5e86`](https://github.com/amazon-contributing/alertmanager/commit/1b55bb5e86f1fe4b6372cbbf53a7a4a047731080) |
