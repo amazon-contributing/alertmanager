@@ -3,7 +3,7 @@
 Auto-generated — do not edit by hand. Delta of `main` vs `upstream/main` (patch-id aware: upstream-absorbed changes drop out automatically).
 **Total carried changes: 12**
 
-Generated from `cortex-main` @ `e4b8106a29` vs `upstream/main` on 2026-11-16 08:23 UTC.
+Generated from `cortex-main` @ `e4b8106a29` vs `upstream/main` on 2026-11-23 08:12 UTC.
 
 ## Build/tooling
 
